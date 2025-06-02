@@ -14,6 +14,8 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+var version string
+
 // NodeObject 表示解析后的单个节点数据
 type NodeObject struct {
 	line   string
