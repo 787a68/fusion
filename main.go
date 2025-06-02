@@ -9,11 +9,13 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
-// version 将通过编译参数动态注入，例如：-ldflags "-X main.version=v1.2.3"
-var version string
+// version 将通过编译参数动态注入，例如：-ldflags "-X main.version=20250602171430"
+// 如果未注入，则默认"unknown"
+var version = "unknown"
 
 // NodeObject 表示解析后的单个节点数据
 type NodeObject struct {
@@ -40,7 +42,18 @@ var (
 	// 收集机场订阅（值以 "https://" 开头）和自建节点配置（其它文本）
 	subscriptions   []Subscription
 	selfNodeConfigs []string
+
+	// 缓存：对相同请求（按 r.RequestURI 做 key）在短时间内返回相同响应
+	cacheMutex     sync.Mutex
+	cachedResponse = make(map[string]cachedItem)
+	cacheDuration  = 10 * time.Minute
 )
+
+// cachedItem 表示缓存的响应项目
+type cachedItem struct {
+	timestamp time.Time
+	content   string
+}
 
 // initEnv 从环境变量中读取 TOKEN，并遍历所有环境变量，将非 TOKEN 的变量按是否以 "https://" 开头分别归为机场订阅与自建节点配置
 func initEnv() {
@@ -148,9 +161,9 @@ func processQueryParams(query map[string][]string) map[string]string {
 	return result
 }
 
-// handler 处理 HTTP 请求，验证路径、处理订阅与自建节点，然后生成最终配置，并打印详细日志。
+// handler 处理 HTTP 请求，验证路径、执行缓存判断、处理订阅与自建节点，然后生成最终配置，并打印详细日志
 func handler(w http.ResponseWriter, r *http.Request) {
-	// 针对 OPTIONS 请求直接返回 CORS 响应，避免重复上游调用
+	// 处理 OPTIONS 请求用于 CORS 预检
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -158,8 +171,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-
-	// 仅允许 GET 请求，其它方法返回 405
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
@@ -168,74 +179,95 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 记录客户端请求 header
 	log.Printf("客户端请求 header: %v", r.Header)
 
-	// 仅允许路径为 "/<TOKEN>" 的请求
+	// 检查访问路径：仅允许 "/<TOKEN>"
 	if r.URL.Path != "/"+token {
 		http.Error(w, "Forbidden: Invalid Access Path", http.StatusForbidden)
 		return
 	}
 
-	// 根据查询参数构造参数映射，如 ?udp=xxx&tfo=xxx&quic=xxx
-	qParams := processQueryParams(r.URL.Query())
+	// 使用 URL 的 RequestURI 作为缓存 key（可根据需要扩展为加上客户端IP）
+	cacheKey := r.URL.RequestURI()
+	cacheMutex.Lock()
+	if item, exists := cachedResponse[cacheKey]; exists {
+		if time.Since(item.timestamp) < cacheDuration {
+			log.Printf("重复请求, 在缓存时间内，直接返回缓存内容")
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			fmt.Fprint(w, item.content)
+			cacheMutex.Unlock()
+			return
+		}
+	}
+	cacheMutex.Unlock()
 
+	// 根据查询参数（如 ?udp=xxx&tfo=xxx&quic=xxx）构造参数映射
+	qParams := processQueryParams(r.URL.Query())
 	var allNodeObjects []NodeObject
 
-	// 定义 HTTP 客户端：设置超时 30s，以及 Transport 跳过 TLS 验证，
-	// 适用上游 URL 为 IP 地址时可能的证书/ SNI 问题
+	// 定义 HTTP 客户端，超时设置为 30s（使用默认 TLS 验证，因为上游证书无误）
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			// 默认 TLS 验证，只要上游证书正常即可
+			TLSClientConfig: &tls.Config{},
+			// 如果需要强制IPv4可在DialContext中指定"tcp4"，这里只使用默认
 		},
 	}
 
-	// 处理机场订阅
+	// 并发处理机场订阅（针对每个环境变量值以 "https://" 开头的请求）
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	for _, sub := range subscriptions {
-		log.Printf("开始请求机场订阅：%s (标识: %s)", sub.url, sub.airportName)
-		req, err := http.NewRequest("GET", sub.url, nil)
-		if err != nil {
-			log.Printf("构造请求失败 [%s]: %v", sub.airportName, err)
-			continue
-		}
-		// 转发客户端 header 中的 "user-agent" 与 "x-surge-unlocked-features"
-		if ua := r.Header.Get("user-agent"); ua != "" {
-			req.Header.Set("user-agent", ua)
-		}
-		if xsf := r.Header.Get("x-surge-unlocked-features"); xsf != "" {
-			req.Header.Set("x-surge-unlocked-features", xsf)
-		}
-		// 可选：如需要可设置 Host（此处未做特殊处理）
-		log.Printf("上游请求 header for [%s]: %v", sub.airportName, req.Header)
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("请求机场订阅失败 [%s]: %v", sub.airportName, err)
-			continue
-		}
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			log.Printf("读取订阅响应失败 [%s]: %v", sub.airportName, err)
-			continue
-		}
-		body := string(bodyBytes)
-		log.Printf("上游返回 header for [%s]: %v, 内容前200字符: %.200s", sub.airportName, resp.Header, body)
-		if !strings.Contains(strings.ToLower(body), "[proxy]") {
-			log.Printf("跳过 [%s]：非 Surge 格式(缺少 [Proxy] 区块)", sub.airportName)
-			continue
-		}
-		rawEntries := extractProxyEntries(body)
-		var cleanedEntries []string
-		for _, entry := range rawEntries {
-			cleanedEntries = append(cleanedEntries, removeInlineComment(entry))
-		}
-		for _, entry := range cleanedEntries {
-			allNodeObjects = append(allNodeObjects, NodeObject{
-				line:   entry,
-				prefix: sub.airportName,
-			})
-		}
+		wg.Add(1)
+		go func(sub Subscription) {
+			defer wg.Done()
+			log.Printf("开始请求机场订阅：%s (标识: %s)", sub.url, sub.airportName)
+			req, err := http.NewRequest("GET", sub.url, nil)
+			if err != nil {
+				log.Printf("构造请求失败 [%s]: %v", sub.airportName, err)
+				return
+			}
+			if ua := r.Header.Get("user-agent"); ua != "" {
+				req.Header.Set("user-agent", ua)
+			}
+			if xsf := r.Header.Get("x-surge-unlocked-features"); xsf != "" {
+				req.Header.Set("x-surge-unlocked-features", xsf)
+			}
+			log.Printf("上游请求 header for [%s]: %v", sub.airportName, req.Header)
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Printf("请求机场订阅失败 [%s]: %v", sub.airportName, err)
+				return
+			}
+			bodyBytes, err := ioutil.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				log.Printf("读取订阅响应失败 [%s]: %v", sub.airportName, err)
+				return
+			}
+			body := string(bodyBytes)
+			log.Printf("上游返回 header for [%s]: %v, 内容前200字符: %.200s", sub.airportName, resp.Header, body)
+			if !strings.Contains(strings.ToLower(body), "[proxy]") {
+				log.Printf("跳过 [%s]：非 Surge 格式(缺少 [Proxy] 区块)", sub.airportName)
+				return
+			}
+			rawEntries := extractProxyEntries(body)
+			var cleanedEntries []string
+			for _, entry := range rawEntries {
+				cleanedEntries = append(cleanedEntries, removeInlineComment(entry))
+			}
+			mu.Lock()
+			for _, entry := range cleanedEntries {
+				allNodeObjects = append(allNodeObjects, NodeObject{
+					line:   entry,
+					prefix: sub.airportName,
+				})
+			}
+			mu.Unlock()
+		}(sub)
 	}
+	wg.Wait()
 
-	// 处理自建节点：对每个配置文本先去掉所有注释再按行拆分与去除行内注释
+	// 处理自建节点：对每个配置文本先去除所有注释，再按行拆分、去除行内注释
 	for _, configText := range selfNodeConfigs {
 		cleaned := removeAllInlineComments(configText)
 		lines := strings.Split(cleaned, "\n")
@@ -250,8 +282,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 过滤节点：剔除包含 "direct" 或 "reject"（大小写忽略）的假节点，
-	// 同时根据等号右侧（详情）分组，重复时保留名称较短的记录。
+	// 过滤节点：剔除包含 "direct" 或 "reject"（忽略大小写）的假节点；同时根据等号右侧分组，
+	// 若重复时保留节点名称较短的记录
 	nodeMap := make(map[string]NodeObject)
 	for _, obj := range allNodeObjects {
 		lowerLine := strings.ToLower(obj.line)
@@ -288,6 +320,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	mergedConfig := "[Proxy]\n" + strings.Join(finalNodes, "\n")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	log.Printf("返回客户端 header: %v, 内容前200字符: %.200s", w.Header(), mergedConfig)
+	// 将生成的响应存入缓存，便于后续短时间内重复请求直接返回
+	cacheMutex.Lock()
+	cachedResponse[cacheKey] = cachedItem{timestamp: time.Now(), content: mergedConfig}
+	cacheMutex.Unlock()
 	fmt.Fprint(w, mergedConfig)
 }
 
