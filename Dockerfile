@@ -1,25 +1,23 @@
-# 使用 golang Alpine 镜像作为构建阶段
+# 构建阶段：使用 golang:1.19-alpine 作为构建环境
 FROM golang:1.19-alpine AS builder
-# 定义构建参数 VERSION
 ARG VERSION
 
-# 输出 VERSION 值用于调试（构建日志中会显示这行）
+# 输出传入的 VERSION 以便调试
 RUN echo "VERSION: ${VERSION}"
 
 WORKDIR /app
 
-# 复制 go.mod 与 main.go（如有 go.sum，也请复制）
+# 复制 go.mod 和 main.go（如果没有 go.sum，不要复制）
 COPY go.mod .
-COPY go.sum .  # 如有 go.sum 文件
 COPY main.go .
 
-# 下载依赖
+# 下载所有依赖
 RUN go mod download
 
-# 执行编译，利用 -ldflags 注入 VERSION 到 main.version 变量中
+# 编译二进制文件，并利用 ldflags 注入版本号
 RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-X main.version=${VERSION}" -o fusion-worker .
 
-# 运行阶段，使用 alpine 作为更小的基础镜像
+# 运行阶段：使用 alpine 镜像
 FROM alpine:latest
 WORKDIR /app
 COPY --from=builder /app/fusion-worker .
