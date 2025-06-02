@@ -21,7 +21,7 @@ RUN go mod download
 RUN echo "VERSION: ${VERSION}"
 
 # 编译二进制文件，注意这里不再使用多余的转义符，命令如下：
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-X main.version=${VERSION}" -o fusion-worker .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-X github.com/787a68/fusion.version=${VERSION}" -o fusion-worker .
 
 # 运行阶段，使用精简的 alpine 镜像
 FROM alpine:latest
