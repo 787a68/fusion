@@ -5,16 +5,16 @@ ENV VERSION=${VERSION}
 
 WORKDIR /app
 
-# 复制 go.mod 文件
+# 复制 go.mod 文件；如果你的仓库中没有 go.sum 文件，这里仅复制 go.mod
 COPY go.mod .
 
-# 显式获取依赖，再自动生成 go.sum 条目，并下载其它依赖
-RUN go get golang.org/x/sync/singleflight && go mod tidy && go mod download
+# 在容器内生成或更新 go.sum 文件，下载 golang.org/x/sync/singleflight 依赖
+RUN go get -d golang.org/x/sync/singleflight && go mod tidy && go mod download
 
 # 复制源码文件
 COPY main.go .
 
-# 动态获取模块路径并编译
+# 利用模块路径和 ldflags 编译生成可执行文件
 RUN MODULE=$(go list -m -f '{{.Path}}') && \
     CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-X ${MODULE}.version=${VERSION}" -o fusion-worker .
 
