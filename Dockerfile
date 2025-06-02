@@ -1,20 +1,20 @@
 FROM golang:1.19-alpine AS builder
 
-# 定义构建参数 VERSION 并设置为环境变量
 ARG VERSION
 ENV VERSION=${VERSION}
 
 WORKDIR /app
 
-# 复制 go.mod 和源码文件（如果有 go.sum 文件，请取消注释下一行）
+# 复制 go.mod 文件
 COPY go.mod .
-# COPY go.sum .
+
+# 如果没有提交 go.sum 文件，则在构建时生成必要的校验信息
+RUN go mod tidy && go mod download
+
+# 复制源码文件
 COPY main.go .
 
-# 下载所有依赖
-RUN go mod download
-
-# 动态获取模块路径并编译，不再输出调试信息
+# 动态获取模块路径并编译
 RUN MODULE=$(go list -m -f '{{.Path}}') && \
     CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-X ${MODULE}.version=${VERSION}" -o fusion-worker .
 
