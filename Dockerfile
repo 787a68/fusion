@@ -1,5 +1,5 @@
 # 构建阶段：使用官方 golang 镜像（alpine版）编译程序
-FROM golang:1.19-alpine as builder
+FROM golang:1.19-alpine AS builder
 WORKDIR /app
 COPY go.mod .
 COPY main.go .

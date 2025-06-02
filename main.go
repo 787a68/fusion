@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // NodeObject 表示解析后的单个节点数据
@@ -23,7 +24,7 @@ type Subscription struct {
 }
 
 var (
-	token           string            // 必须通过环境变量 TOKEN 设置
+	token           string // 必须通过环境变量 TOKEN 设置
 	// 固定的参数映射：查询参数简写 -> Surge 完整参数
 	paramMap = map[string]string{
 		"udp":  "udp-relay",
@@ -35,7 +36,7 @@ var (
 	selfNodeConfigs []string
 )
 
-// initEnv 从环境变量中读取 TOKEN，并遍历所有环境变量，将非 TOKEN 的变量按是否以 "https://" 开头分为机场订阅与自建节点配置
+// initEnv 从环境变量中读取 TOKEN，并遍历所有环境变量，将非 TOKEN 的变量按是否以 "https://" 开头分别归为机场订阅与自建节点配置
 func initEnv() {
 	token = os.Getenv("TOKEN")
 	if token == "" {
@@ -105,7 +106,7 @@ func extractProxyEntries(text string) []string {
 	return proxyEntries
 }
 
-// modifyProxyEntry 修改单个节点条目：根据传入的参数映射更新或追加参数配置；同时如果前缀不在节点名称开头则加上前缀。
+// modifyProxyEntry 修改单个节点条目：根据传入的参数映射更新或追加参数配置；如果前缀不在节点名称开头则加上前缀。
 // 最后去除逗号后多余的空格。
 func modifyProxyEntry(line string, prefix string, params map[string]string) string {
 	idx := strings.Index(line, "=")
@@ -131,7 +132,7 @@ func modifyProxyEntry(line string, prefix string, params map[string]string) stri
 	return namePart + " " + configPart
 }
 
-// processQueryParams 根据 HTTP 请求中的查询参数构造参数映射（用 full 参数名替换简写）
+// processQueryParams 根据 HTTP 请求中的查询参数构造参数映射（将简写替换为完整参数名）
 func processQueryParams(query map[string][]string) map[string]string {
 	result := make(map[string]string)
 	for short, full := range paramMap {
@@ -142,8 +143,27 @@ func processQueryParams(query map[string][]string) map[string]string {
 	return result
 }
 
-// handler 处理 HTTP 请求：对请求 TOKEN 进行验证，对订阅项和自建节点构造节点数据，然后过滤、更新并生成最终配置。
+// handler 处理 HTTP 请求：验证路径、处理订阅和自建节点，过滤与合并节点，并生成最终配置。
 func handler(w http.ResponseWriter, r *http.Request) {
+	// 若为 OPTIONS 请求，直接返回对应的 CORS 响应以避免重复请求上游
+	if r.Method == http.MethodOptions {
+		// 设置必要的 CORS 头部
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, user-agent, x-surge-unlocked-features")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// 仅允许 GET 请求
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 记录客户端请求 header
+	log.Printf("客户端请求 header: %v", r.Header)
+
 	// 仅允许路径为 "/<TOKEN>" 的请求
 	if r.URL.Path != "/"+token {
 		http.Error(w, "Forbidden: Invalid Access Path", http.StatusForbidden)
@@ -155,10 +175,16 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	var allNodeObjects []NodeObject
 
+	// 使用具有超时设置的 HTTP 客户端，避免因上游响应过慢导致超时
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
 	// 处理机场订阅
 	for _, sub := range subscriptions {
 		log.Printf("开始请求机场订阅：%s (标识: %s)", sub.url, sub.airportName)
-		// 构造自定义请求，转发客户端的 user-agent 与 x-surge-unlocked-features
+
+		// 构造自定义请求，转发客户端的 "user-agent" 与 "x-surge-unlocked-features" header
 		req, err := http.NewRequest("GET", sub.url, nil)
 		if err != nil {
 			log.Printf("构造请求失败 [%s]: %v", sub.airportName, err)
@@ -170,7 +196,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		if xsf := r.Header.Get("x-surge-unlocked-features"); xsf != "" {
 			req.Header.Set("x-surge-unlocked-features", xsf)
 		}
-		resp, err := http.DefaultClient.Do(req)
+		// 记录上游请求 header
+		log.Printf("上游请求 header for [%s]: %v", sub.airportName, req.Header)
+
+		resp, err := client.Do(req)
 		if err != nil {
 			log.Printf("请求机场订阅失败 [%s]: %v", sub.airportName, err)
 			continue
@@ -182,13 +211,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		body := string(bodyBytes)
-		log.Printf("上游返回 [%s]：%s", sub.airportName, body)
+		// 记录上游返回 header 与部分内容（取前 200 个字符）
+		log.Printf("上游返回 header for [%s]: %v, 内容前200字符: %.200s", sub.airportName, resp.Header, body)
 		// 判断返回文本是否包含 [Proxy] 区块（不区分大小写）
 		if !strings.Contains(strings.ToLower(body), "[proxy]") {
 			log.Printf("跳过 [%s]：非 Surge 格式(缺少 [Proxy] 区块)", sub.airportName)
 			continue
 		}
-		// 先提取 [Proxy] 区块，再对每行去除内联注释
+		// 提取 [Proxy] 区块，再对每行去除内联注释
 		rawEntries := extractProxyEntries(body)
 		var cleanedEntries []string
 		for _, entry := range rawEntries {
@@ -202,7 +232,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 处理自建节点：处理配置文本，先去除注释后逐行分割，并去除每行内联注释
+	// 处理自建节点：对每个自建节点配置文本，先清除所有注释，再逐行拆分、清除行内注释
 	for _, configText := range selfNodeConfigs {
 		cleaned := removeAllInlineComments(configText)
 		lines := strings.Split(cleaned, "\n")
@@ -218,8 +248,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 过滤节点：
-	// a. 移除节点中（转小写后）包含 "direct" 或 "reject" 的（假节点）
-	// b. 对余下节点，根据等号后面的"详情"进行分组，如果有重复详情，保留节点名称（= 左侧内容）较短的那一条记录
+	// a. 移除行中（转换为小写）包含 "direct" 或 "reject" 的假节点
+	// b. 根据等号右侧（详情）分组，对于重复详情保留节点名称较短的记录
 	nodeMap := make(map[string]NodeObject)
 	for _, obj := range allNodeObjects {
 		lowerLine := strings.ToLower(obj.line)
@@ -246,16 +276,20 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		filteredNodes = append(filteredNodes, obj)
 	}
 
-	// 对过滤后的每个节点做参数修改（更新或追加查询参数中的配置）
+	// 对过滤后的节点应用参数修改（更新或追加查询参数中的配置）
 	var finalNodes []string
 	for _, obj := range filteredNodes {
 		modified := modifyProxyEntry(obj.line, obj.prefix, qParams)
 		finalNodes = append(finalNodes, modified)
 	}
 
-	// 生成最终 Surge 配置，开头加上 [Proxy] 标识
+	// 生成最终 Surge 配置，添加 "[Proxy]" 开头标识
 	mergedConfig := "[Proxy]\n" + strings.Join(finalNodes, "\n")
+
+	// 设置返回 header
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// 在发送前记录返回给客户端的 header 与部分内容
+	log.Printf("返回客户端 header: %v, 内容前200字符: %.200s", w.Header(), mergedConfig)
 	fmt.Fprint(w, mergedConfig)
 }
 
