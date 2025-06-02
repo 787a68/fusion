@@ -8,8 +8,8 @@ WORKDIR /app
 # 复制 go.mod 文件
 COPY go.mod .
 
-# 如果没有提交 go.sum 文件，则在构建时生成必要的校验信息
-RUN go mod tidy && go mod download
+# 显式获取依赖，再自动生成 go.sum 条目，并下载其它依赖
+RUN go get golang.org/x/sync/singleflight && go mod tidy && go mod download
 
 # 复制源码文件
 COPY main.go .
