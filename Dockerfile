@@ -1,29 +1,28 @@
 # 构建阶段，使用 golang:1.19-alpine
 FROM golang:1.19-alpine AS builder
 
-# 定义构建参数 VERSION，并将其导出到环境变量中，便于后续命令展开
+# 定义构建参数 VERSION，并写入环境变量中
 ARG VERSION
 ENV VERSION=${VERSION}
 
 WORKDIR /app
 
-# 复制模块配置和源码；如果你没有 go.sum 文件，请删除下面这行
+# 复制申请文件；注意如果没有 go.sum 文件请不要复制它
 COPY go.mod .
-# COPY go.sum .
-
-# 将源码复制进来
 COPY main.go .
 
 # 下载依赖
 RUN go mod download
 
-# 输出 VERSION 用于调试（构建日志中应能看到有效值）
+# 输出 VERSION 用于调试
 RUN echo "VERSION: ${VERSION}"
 
-# 编译二进制文件，注意这里不再使用多余的转义符，命令如下：
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-X github.com/787a68/fusion.version=${VERSION}" -o fusion-worker .
+# 动态获取模块路径，然后用该值构建 ldflags 参数
+RUN MODULE=$(go list -m -f '{{.Path}}') && \
+    echo "MODULE: ${MODULE}" && \
+    CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-X ${MODULE}.version=${VERSION}" -o fusion-worker .
 
-# 运行阶段，使用精简的 alpine 镜像
+# 运行阶段，使用 alpine 作为更小的基础镜像
 FROM alpine:latest
 
 WORKDIR /app
