@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Set current version
+      - name: Set Current Version
         id: get_version
         run: echo "version=$(date +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
 
@@ -28,6 +28,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: 787a68/fusion:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/fusion:latest
           build-args: |
             VERSION=${{ steps.get_version.outputs.version }}

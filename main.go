@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 	"golang.org/x/sync/singleflight"
 )
 
@@ -284,7 +285,6 @@ func updateContent(r *http.Request) (string, error) {
 
 // handler 负责处理 HTTP 请求，利用缓存和 singleflight 保证重复请求不重新调用上游
 func handler(w http.ResponseWriter, r *http.Request) {
-	// 处理 CORS 预检
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -302,7 +302,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 固定缓存 key "global"
 	cacheKey := "global"
 	cacheMutex.Lock()
 	if item, exists := cachedResponse[cacheKey]; exists && time.Since(item.timestamp) < cacheDuration {
@@ -314,7 +313,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 	cacheMutex.Unlock()
 
-	// 使用 singleflight 确保只执行一次更新
 	result, err, _ := sfGroup.Do("update", func() (interface{}, error) {
 		return updateContent(r)
 	})
@@ -328,7 +326,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 存入缓存
 	cacheMutex.Lock()
 	cachedResponse[cacheKey] = cachedItem{timestamp: time.Now(), content: mergedConfig}
 	cacheMutex.Unlock()
