@@ -15,7 +15,7 @@ import (
     "golang.org/x/sync/singleflight"
 )
 
-var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=your-version"
+var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=<your-version>"
 
 type Subscription struct {
     airportName string
@@ -25,14 +25,16 @@ type Subscription struct {
 var (
     token string
 
-    // paramMap 用于将 URL 查询参数中的简写映射为完整配置参数名
+    // paramMap 将 URL 查询参数中的简写映射为完整配置参数名称
     paramMap = map[string]string{
         "udp":  "udp-relay",
         "tfo":  "tfo",
         "quic": "block-quic",
     }
 
-    subscriptions   []Subscription
+    // 订阅信息来自固定环境变量 SUBSCRIPTIONS
+    subscriptions []Subscription
+    // 自建节点变量来自固定环境变量 CUSTOM_NODE
     selfNodeConfigs []string
 
     cacheMutex     sync.Mutex
@@ -47,37 +49,45 @@ type cachedItem struct {
     content   string
 }
 
-// initEnv 从环境变量中初始化 TOKEN，自建节点（CUSTOM_NODE）以及订阅机场。
-// 固定变量为 TOKEN 和 CUSTOM_NODE，其它所有环境变量均视为订阅机场。
+// initEnv 从环境变量中初始化 TOKEN、自建节点以及订阅机场信息。
+// 订阅数据来自固定环境变量 SUBSCRIPTIONS（多行格式，每行 "机场名 url"）。
+// 自建节点数据来自固定环境变量 CUSTOM_NODE。
 func initEnv() {
     token = os.Getenv("TOKEN")
     if token == "" {
         log.Fatal("TOKEN environment variable is not set")
     }
 
-    for _, envVar := range os.Environ() {
-        parts := strings.SplitN(envVar, "=", 2)
-        if len(parts) != 2 {
-            continue
-        }
-        key, value := parts[0], parts[1]
-        if key == "TOKEN" {
-            continue
-        }
-        if key == "CUSTOM_NODE" {
-            // 自建节点直接使用原始内容
-            if value != "" {
-                selfNodeConfigs = append(selfNodeConfigs, value)
+    // 读取固定环境变量 SUBSCRIPTIONS，按行解析，每行格式为 "机场名 url"
+    subs := os.Getenv("SUBSCRIPTIONS")
+    if subs != "" {
+        lines := strings.Split(subs, "\n")
+        for _, line := range lines {
+            line = strings.TrimSpace(line)
+            if line == "" {
+                continue
             }
-        } else {
-            // 其他均视为订阅机场
-            if value != "" {
-                subscriptions = append(subscriptions, Subscription{
-                    airportName: key,
-                    url:         value,
-                })
+            // 使用 strings.Fields 分割（空白为分隔符）
+            parts := strings.Fields(line)
+            if len(parts) < 2 {
+                log.Printf("Invalid subscription entry: %s", line)
+                continue
             }
+            airportName := parts[0]
+            // URL 可能包含空格，将剩余部分拼接
+            url := strings.Join(parts[1:], " ")
+            subscriptions = append(subscriptions, Subscription{
+                airportName: airportName,
+                url:         url,
+            })
         }
+    }
+
+    // 读取自建节点信息，固定使用 CUSTOM_NODE 环境变量
+    customNode := os.Getenv("CUSTOM_NODE")
+    if customNode != "" {
+        // 注意，自建节点直接使用原始内容，不做 trim
+        selfNodeConfigs = append(selfNodeConfigs, customNode)
     }
 }
 
@@ -109,8 +119,8 @@ func extractProxyEntries(text string) []string {
 }
 
 // modifyProxyEntry 对订阅条目进行格式处理：
-// 保留原始左侧（如果未包含机场名称则添加），
-// 将 URL 查询参数覆盖到配置部分后移除配置部分内的所有空格。
+// 拆分 "=" 后保持原始左侧（如果未包含机场名称则添加），
+// 将 URL 查询参数覆盖到配置部分后移除配置部分内的空格（如果原始无空格则无影响）。
 func modifyProxyEntry(line string, prefix string, params map[string]string) string {
     idx := strings.Index(line, "=")
     if idx == -1 {
@@ -233,6 +243,7 @@ func updateContent(r *http.Request) (string, error) {
         processedSubs = append(processedSubs, v)
     }
 
+    // 处理自建节点：直接使用原始内容追加
     var selfEntries []string
     for _, config := range selfNodeConfigs {
         if config != "" {
@@ -334,11 +345,11 @@ func main() {
     initEnv()
     http.HandleFunc("/heartbeat", heartbeatHandler)
     http.HandleFunc("/", handler)
-
-    // 固定端口为3000
+    
+    // 端口固定为3000
     port := "3000"
     addr := ":" + port
-    // 直接使用构建时通过 ldflags 注入的版本号，不判断
+    // 版本号由 ldflags 注入到全局变量 version 中
     log.Printf("Server started. Version: %s, Listening on %s", version, addr)
     log.Fatal(http.ListenAndServe(addr, nil))
 }
