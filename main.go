@@ -18,7 +18,7 @@ import (
 
 var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=your-version"
 
-var requestCount int64 // 客户端请求计数（原子计数）
+var requestCount int64 // 客户端请求计数（原子操作）
 
 type Subscription struct {
     airportName string
@@ -28,16 +28,16 @@ type Subscription struct {
 var (
     token string
 
-    // paramMap: 将 URL 查询参数中的简写映射为完整配置参数名称
+    // paramMap：将 URL 查询参数中的简写映射为完整配置参数名称
     paramMap = map[string]string{
         "udp":  "udp-relay",
         "tfo":  "tfo",
         "quic": "block-quic",
     }
 
-    // 订阅信息，来源于环境变量 SUBSCRIPTIONS，多个条目使用 "||" 分隔，每个条目格式为 "名称=url"
+    // 订阅节点信息，从环境变量 SUBSCRIPTIONS 读取，每个条目格式为 "名称=url"，多个条目以 "||" 分隔
     subscriptions []Subscription
-    // 自建节点信息，来源于环境变量 CUSTOM_NODE，也使用 "||" 分隔，直接原样使用
+    // 自建节点信息，从环境变量 CUSTOM_NODE 读取，同样以 "||" 分隔，内容直接原样使用
     selfNodeConfigs []string
 
     cacheMutex     sync.Mutex
@@ -53,9 +53,9 @@ type cachedItem struct {
 }
 
 // initEnv 从环境变量中初始化 TOKEN、自建节点和订阅节点信息。
-// 订阅节点数据必须写在固定环境变量 SUBSCRIPTIONS 内，格式示例如下：
-//     SUBSCRIPTIONS=ENET=https://106.75.141.41/YT||CNA=https://yuntong.one/yt?token=87
-// 自建节点数据写在环境变量 CUSTOM_NODE 内，格式与订阅节点类似（多个条目以 "||" 分隔）。
+// 例如：
+//   SUBSCRIPTIONS=ENET=https://106.75.141.41/YT||CNA=https://yuntong.one/yt?token=87
+//   CUSTOM_NODE=自建节点1配置||自建节点2配置
 func initEnv() {
     token = os.Getenv("TOKEN")
     if token == "" {
@@ -126,8 +126,8 @@ func extractProxyEntries(text string) []string {
 }
 
 // modifyProxyEntry 对订阅条目进行格式处理：
-// 1. 保留原始左侧（如果未包含名称则补充）；
-// 2. 将 URL 查询参数覆盖到配置部分后，移除配置部分内所有空格。
+// 1. 保留原始左侧（如果未包含名称则自动补充）；
+// 2. 将 URL 查询参数覆盖到配置部分后，将该部分中的所有空格移除。
 func modifyProxyEntry(line string, prefix string, params map[string]string) string {
     idx := strings.Index(line, "=")
     if idx == -1 {
@@ -161,7 +161,8 @@ func processQueryParams(query map[string][]string) map[string]string {
     return result
 }
 
-// updateContent 从上游订阅获取代理配置。上游请求超时设为 6 秒。
+// updateContent 从上游订阅获取完整代理配置，上游请求超时为 6 秒。
+// 处理完订阅条目后，对订阅结果先排序，再将自建节点内容插入到最前面，并返回完整内容。
 func updateContent(r *http.Request) (string, error) {
     var subEntries []string
     var mu sync.Mutex
@@ -172,7 +173,6 @@ func updateContent(r *http.Request) (string, error) {
         wg.Add(1)
         go func(s Subscription) {
             defer wg.Done()
-            // 去掉日志中多余的“机场”字样
             log.Printf("发送订阅请求，%s，请求头：%+v", s.airportName, r.Header)
             req, err := http.NewRequest("GET", s.url, nil)
             if err != nil {
@@ -199,11 +199,12 @@ func updateContent(r *http.Request) (string, error) {
                 return
             }
             bodyStr := string(bodyBytes)
-            preview := bodyStr
-            if len(preview) > 100 {
-                preview = preview[:100]
-            }
-            log.Printf("[%s] 响应预览：%s", s.airportName, preview)
+            log.Printf("[%s] 响应预览：%s", s.airportName, func() string {
+                if len(bodyStr) > 100 {
+                    return bodyStr[:100]
+                }
+                return bodyStr
+            }())
             if !strings.Contains(strings.ToLower(bodyStr), "[proxy]") {
                 log.Printf("跳过 [%s]，格式非 Surge", s.airportName)
                 return
@@ -213,7 +214,6 @@ func updateContent(r *http.Request) (string, error) {
             for _, entry := range entries {
                 if entry != "" && strings.Contains(entry, "=") {
                     parts := strings.SplitN(entry, "=", 2)
-                    // 如果左侧不含订阅名称则补充
                     if !strings.HasPrefix(parts[0], s.airportName) {
                         entry = s.airportName + " " + entry
                     }
@@ -227,7 +227,6 @@ func updateContent(r *http.Request) (string, error) {
 
     qParams := processQueryParams(r.URL.Query())
     var processedSubs []string
-    // 对订阅条目进行处理：覆盖查询参数、去除无效项等
     dedupMap := make(map[string]string)
     for _, entry := range subEntries {
         modified := modifyProxyEntry(entry, "", qParams)
@@ -253,18 +252,12 @@ func updateContent(r *http.Request) (string, error) {
     for _, v := range dedupMap {
         processedSubs = append(processedSubs, v)
     }
-    // 对订阅条目进行排序
+    // 排序订阅条目
     sort.Strings(processedSubs)
-    // 最后将自建节点插入到最前面
+    // 将自建节点内容插入到最前面
     finalEntries := append(selfNodeConfigs, processedSubs...)
     finalConfig := "[Proxy]\n" + strings.Join(finalEntries, "\n")
-
-    // 返回预览：如果内容较长，则截取前 200 个字符，并追加 "..."
-    preview := finalConfig
-    if len(preview) > 200 {
-        preview = preview[:200] + "..."
-    }
-    return preview, nil
+    return finalConfig, nil
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -293,9 +286,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
     cacheMutex.Lock()
     if item, exists := cachedResponse["global"]; exists && time.Since(item.timestamp) < cacheDuration {
         cacheMutex.Unlock()
-        log.Printf("缓存命中，返回缓存内容 #%d，请求头：%+v", reqNum, r.Header)
+        log.Printf("缓存命中，直接返回缓存内容 #%d", reqNum)
+        // 直接从内存中返回缓存的完整内容
         w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-        log.Printf("返回响应 #%d，响应头：%+v，内容预览：%s", reqNum, w.Header(), item.content)
+        w.Header().Set("Content-Disposition", "attachment; filename=sub")
         w.Write([]byte(item.content))
         return
     }
@@ -308,17 +302,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
         http.Error(w, "更新内容失败", http.StatusInternalServerError)
         return
     }
-    mergedPreview, ok := result.(string)
+    mergedConfig, ok := result.(string)
     if !ok {
         http.Error(w, "内部错误", http.StatusInternalServerError)
         return
     }
+    // 更新缓存并从内存返回
     cacheMutex.Lock()
-    cachedResponse["global"] = cachedItem{timestamp: time.Now(), content: mergedPreview}
+    cachedResponse["global"] = cachedItem{timestamp: time.Now(), content: mergedConfig}
     cacheMutex.Unlock()
     w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-    log.Printf("返回新响应 #%d，响应头：%+v，内容预览：%s", reqNum, w.Header(), mergedPreview)
-    fmt.Fprint(w, mergedPreview)
+    w.Header().Set("Content-Disposition", "attachment; filename=sub")
+    log.Printf("返回新响应 #%d，返回完整文件", reqNum)
+    w.Write([]byte(mergedConfig))
 }
 
 func main() {
@@ -326,7 +322,6 @@ func main() {
     http.HandleFunc("/", handler)
     port := "3000"
     addr := ":" + port
-    // 在启动日志中输出版本号（由 ldflags 注入）和监听地址
     log.Printf("服务器已启动，版本：%s，监听地址：%s", version, addr)
     log.Fatal(http.ListenAndServe(addr, nil))
 }
