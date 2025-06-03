@@ -15,7 +15,8 @@ import (
     "golang.org/x/sync/singleflight"
 )
 
-// Subscription 表示上游订阅机场的信息
+var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=your-version"
+
 type Subscription struct {
     airportName string
     url         string
@@ -24,7 +25,7 @@ type Subscription struct {
 var (
     token string
 
-    // paramMap 将 URL 查询参数中简写映射为完整配置参数名称
+    // paramMap 用于将 URL 查询参数中的简写映射为完整配置参数名
     paramMap = map[string]string{
         "udp":  "udp-relay",
         "tfo":  "tfo",
@@ -46,16 +47,15 @@ type cachedItem struct {
     content   string
 }
 
-// initEnv 从环境变量中初始化 TOKEN、自建节点以及订阅机场
-// 固定变量为 TOKEN 与 CUSTOM_NODE，其它所有环境变量均视为订阅机场
+// initEnv 从环境变量中初始化 TOKEN，自建节点（CUSTOM_NODE）以及订阅机场。
+// 固定变量为 TOKEN 和 CUSTOM_NODE，其它所有环境变量均视为订阅机场。
 func initEnv() {
     token = os.Getenv("TOKEN")
     if token == "" {
         log.Fatal("TOKEN environment variable is not set")
     }
 
-    envVars := os.Environ()
-    for _, envVar := range envVars {
+    for _, envVar := range os.Environ() {
         parts := strings.SplitN(envVar, "=", 2)
         if len(parts) != 2 {
             continue
@@ -65,12 +65,12 @@ func initEnv() {
             continue
         }
         if key == "CUSTOM_NODE" {
-            // 直接使用原始值，不做 trim
+            // 自建节点直接使用原始内容
             if value != "" {
                 selfNodeConfigs = append(selfNodeConfigs, value)
             }
         } else {
-            // 其他全部视为订阅机场
+            // 其他均视为订阅机场
             if value != "" {
                 subscriptions = append(subscriptions, Subscription{
                     airportName: key,
@@ -81,13 +81,11 @@ func initEnv() {
     }
 }
 
-// cleanLine 移除行内注释（以 "//" 或 "#" 开始）并 trim
 func cleanLine(line string) string {
     re := regexp.MustCompile(`\s*(//|#).*`)
     return strings.TrimSpace(re.ReplaceAllString(line, ""))
 }
 
-// extractProxyEntries 从文本中提取 [Proxy] 区域中所有非空且包含 "=" 的行
 func extractProxyEntries(text string) []string {
     lines := strings.Split(text, "\n")
     var entries []string
@@ -111,14 +109,13 @@ func extractProxyEntries(text string) []string {
 }
 
 // modifyProxyEntry 对订阅条目进行格式处理：
-// 拆分 "=" 后对左侧保持原样（如未包含机场名称则添加），
-// 对配置部分应用查询参数覆盖后，再移除配置部分所有空格。
+// 保留原始左侧（如果未包含机场名称则添加），
+// 将 URL 查询参数覆盖到配置部分后移除配置部分内的所有空格。
 func modifyProxyEntry(line string, prefix string, params map[string]string) string {
     idx := strings.Index(line, "=")
     if idx == -1 {
         return line
     }
-    // 保留原始格式，不进行额外 trim
     namePart := line[:idx]
     configPart := line[idx+1:]
     if prefix != "" && !strings.HasPrefix(namePart, prefix) {
@@ -133,12 +130,10 @@ func modifyProxyEntry(line string, prefix string, params map[string]string) stri
             configPart = configPart + fmt.Sprintf(",%s=%s", param, newValue)
         }
     }
-    // 移除配置部分所有空格
     configPart = strings.ReplaceAll(configPart, " ", "")
     return namePart + "=" + configPart
 }
 
-// processQueryParams 提取 URL 查询参数中关注的参数，并生成对应映射
 func processQueryParams(query map[string][]string) map[string]string {
     result := make(map[string]string)
     for short, full := range paramMap {
@@ -149,9 +144,6 @@ func processQueryParams(query map[string][]string) map[string]string {
     return result
 }
 
-// updateContent 更新配置：
-// ① 处理上游订阅：从响应中提取 [Proxy] 区域的所有有效行，若行首未包含机场名则添加，统一进行查询参数覆盖、过滤 "direct"/"reject" 及去重。
-// ② 处理自建节点：直接将每个自建节点环境变量(原样)追加到结果中。
 func updateContent(r *http.Request) (string, error) {
     var subEntries []string
     var mu sync.Mutex
@@ -241,7 +233,6 @@ func updateContent(r *http.Request) (string, error) {
         processedSubs = append(processedSubs, v)
     }
 
-    // 对自建节点直接追加 (不做 TrimSpace)
     var selfEntries []string
     for _, config := range selfNodeConfigs {
         if config != "" {
@@ -254,7 +245,6 @@ func updateContent(r *http.Request) (string, error) {
     return finalConfig, nil
 }
 
-// heartbeat 启动于收到客户端请求后 1 秒，每秒 flush 一次，最长 30 秒
 func heartbeat(ctx context.Context, w http.ResponseWriter) {
     select {
     case <-time.After(1 * time.Second):
@@ -278,19 +268,15 @@ func heartbeat(ctx context.Context, w http.ResponseWriter) {
     }
 }
 
-// heartbeatHandler 响应 /heartbeat 请求返回 "pong"
 func heartbeatHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "text/plain")
     w.WriteHeader(http.StatusOK)
     fmt.Fprint(w, "pong")
 }
 
-// handler 处理客户端 GET 请求，记录完整请求信息（无论成功或失败）。
-// 当鉴权失败时记录完整请求信息后返回 403；对于新请求，每个订阅输出两条日志，返回前输出完整响应 Header 与 Body。
 func handler(w http.ResponseWriter, r *http.Request) {
     log.Printf("Received client request: Method: %s, URL: %s, Host: %s, Headers: %+v",
         r.Method, r.URL.String(), r.Host, r.Header)
-    
     if r.Method == http.MethodOptions {
         w.Header().Set("Access-Control-Allow-Origin", "*")
         w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -303,14 +289,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
         http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
         return
     }
-    // 鉴权：请求路径必须为 "/" + token
-    if r.URL.Path != "/" + token {
+    if r.URL.Path != "/"+token {
         log.Printf("Authentication failed: Request: Method: %s, URL: %s, Host: %s, Headers: %+v",
             r.Method, r.URL.String(), r.Host, r.Header)
         http.Error(w, "Forbidden: Invalid Access Path", http.StatusForbidden)
         return
     }
-    
+
     cacheMutex.Lock()
     if item, exists := cachedResponse["global"]; exists && time.Since(item.timestamp) < cacheDuration {
         cacheMutex.Unlock()
@@ -321,11 +306,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
         return
     }
     cacheMutex.Unlock()
-    
+
     ctx, cancel := context.WithCancel(r.Context())
     defer cancel()
     go heartbeat(ctx, w)
-    
     result, err, _ := sfGroup.Do("update", func() (interface{}, error) {
         return updateContent(r)
     })
@@ -338,11 +322,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
         http.Error(w, "Internal Server Error", http.StatusInternalServerError)
         return
     }
-    
     cacheMutex.Lock()
     cachedResponse["global"] = cachedItem{timestamp: time.Now(), content: mergedConfig}
     cacheMutex.Unlock()
-    
     w.Header().Set("Content-Type", "text/plain; charset=utf-8")
     log.Printf("Returning new response to client: Headers: %+v, Body: %s", w.Header(), mergedConfig)
     fmt.Fprint(w, mergedConfig)
@@ -352,12 +334,11 @@ func main() {
     initEnv()
     http.HandleFunc("/heartbeat", heartbeatHandler)
     http.HandleFunc("/", handler)
-    
-    // 直接使用环境变量 PORT 和 VERSION
-    port := os.Getenv("PORT")
+
+    // 固定端口为3000
+    port := "3000"
     addr := ":" + port
-    ver := os.Getenv("VERSION")
-    
-    log.Printf("Server started. Version: %s, Listening on %s", ver, addr)
+    // 直接使用构建时通过 ldflags 注入的版本号，不判断
+    log.Printf("Server started. Version: %s, Listening on %s", version, addr)
     log.Fatal(http.ListenAndServe(addr, nil))
 }

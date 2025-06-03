@@ -12,7 +12,7 @@ RUN go mod init github.com/temporary/module && go get -d ./...
 RUN go mod tidy && go mod download
 
 RUN MODULE=$(go list -m -f '{{.Path}}') && \
-    CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-X ${MODULE}.version=${VERSION}" -o fusion-worker .
+    CGO_ENABLED=0 GOOS=linux go build -ldflags "-X ${MODULE}.version=${VERSION}" -o fusion-worker .
 
 FROM alpine:latest
 
