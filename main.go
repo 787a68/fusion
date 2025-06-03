@@ -1,7 +1,6 @@
 package main
 
 import (
-    "context"
     "fmt"
     "io/ioutil"
     "log"
@@ -18,8 +17,7 @@ import (
 
 var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=your-version"
 
-// 全局客户端请求计数（使用原子计数）
-var requestCount int64
+var requestCount int64 // 客户端请求计数（使用原子操作）
 
 type Subscription struct {
     airportName string
@@ -29,16 +27,16 @@ type Subscription struct {
 var (
     token string
 
-    // paramMap: 将 URL 查询参数中的简写映射为完整配置参数名
+    // paramMap 将 URL 查询参数中的简写映射为完整配置参数名称
     paramMap = map[string]string{
         "udp":  "udp-relay",
         "tfo":  "tfo",
         "quic": "block-quic",
     }
 
-    // 订阅信息，来源于环境变量 SUBSCRIPTIONS（多个条目用 "||" 分隔，每个条目格式为 "机场名=url"）
+    // 订阅信息，来源于环境变量 SUBSCRIPTIONS（多个条目使用 "||" 分隔，每个条目格式形如 "机场名=url"）
     subscriptions []Subscription
-    // 自建节点，来源于环境变量 CUSTOM_NODE（多个条目用 "||" 分隔），直接原样使用
+    // 自建节点信息，来源于环境变量 CUSTOM_NODE（多个条目同样用 "||" 分隔），直接原样使用
     selfNodeConfigs []string
 
     cacheMutex     sync.Mutex
@@ -54,8 +52,9 @@ type cachedItem struct {
 }
 
 // initEnv 从环境变量中初始化 TOKEN、自建节点及订阅机场信息。
-// 订阅信息使用固定环境变量 SUBSCRIPTIONS，格式为多个条目，使用 "||" 分隔，每个形如 "机场名=url"；
-// 自建节点使用环境变量 CUSTOM_NODE，同样使用 "||" 分隔。
+// 订阅信息来自固定环境变量 SUBSCRIPTIONS，格式为：
+//     机场1=url1||机场2=url2||...
+// 自建节点信息使用环境变量 CUSTOM_NODE，格式同上。
 func initEnv() {
     token = os.Getenv("TOKEN")
     if token == "" {
@@ -126,8 +125,8 @@ func extractProxyEntries(text string) []string {
 }
 
 // modifyProxyEntry 对订阅条目进行格式处理：
-// 1. 保留原始左侧（若未包含机场名称则添加）；
-// 2. 将 URL 查询参数覆盖到配置部分后，移除配置部分内所有空格。
+// 1. 保留原始左侧（如果未包含机场名称则添加）；
+// 2. 将 URL 查询参数覆盖到配置部分后，移除配置部分内的所有空格。
 func modifyProxyEntry(line string, prefix string, params map[string]string) string {
     idx := strings.Index(line, "=")
     if idx == -1 {
@@ -161,11 +160,11 @@ func processQueryParams(query map[string][]string) map[string]string {
     return result
 }
 
-// updateContent 从上游订阅获取配置，超时设置为6秒。
+// updateContent 从上游订阅获取代理配置，上游请求超时设置为 6 秒。
 func updateContent(r *http.Request) (string, error) {
     var subEntries []string
     var mu sync.Mutex
-    // 设置上游请求超时为6秒
+    // 使用超时 6 秒的 HTTP 客户端
     client := &http.Client{Timeout: 6 * time.Second}
     var wg sync.WaitGroup
 
@@ -252,7 +251,7 @@ func updateContent(r *http.Request) (string, error) {
         processedSubs = append(processedSubs, v)
     }
 
-    // 处理自建节点：直接使用原始内容（支持用 "||" 分隔多个节点）
+    // 处理自建节点：直接使用原始内容（支持使用 "||" 分隔多个节点）
     var selfEntries []string
     for _, config := range selfNodeConfigs {
         if config != "" {
@@ -266,7 +265,6 @@ func updateContent(r *http.Request) (string, error) {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-    // 为每个请求计数并获得计数编号
     reqNum := atomic.AddInt64(&requestCount, 1)
     log.Printf("收到客户端请求 #%d，方法：%s，URL：%s，主机：%s，请求头：%+v",
         reqNum, r.Method, r.URL.String(), r.Host, r.Header)
@@ -300,7 +298,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
     }
     cacheMutex.Unlock()
 
-    // 调用上游更新配置
     result, err, _ := sfGroup.Do("update", func() (interface{}, error) {
         return updateContent(r)
     })
@@ -323,18 +320,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
     initEnv()
-    http.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-        // 如需心跳接口，可保留简单实现；这里直接返回"pong"
-        w.Header().Set("Content-Type", "text/plain")
-        w.WriteHeader(http.StatusOK)
-        fmt.Fprint(w, "pong")
-    })
     http.HandleFunc("/", handler)
-
-    // 端口固定为3000
     port := "3000"
     addr := ":" + port
-    // 日志中输出版本号（由 ldflags 注入）和监听地址
     log.Printf("服务器已启动，版本：%s，监听地址：%s", version, addr)
     log.Fatal(http.ListenAndServe(addr, nil))
 }
