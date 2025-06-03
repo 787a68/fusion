@@ -15,7 +15,7 @@ import (
     "golang.org/x/sync/singleflight"
 )
 
-var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=<your-version>"
+var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=your-version"
 
 type Subscription struct {
     airportName string
@@ -25,16 +25,16 @@ type Subscription struct {
 var (
     token string
 
-    // paramMap 将 URL 查询参数中的简写映射为完整配置参数名称
+    // paramMap 将 URL 查询参数中的简写映射为完整配置参数名
     paramMap = map[string]string{
         "udp":  "udp-relay",
         "tfo":  "tfo",
         "quic": "block-quic",
     }
 
-    // 订阅信息来自固定环境变量 SUBSCRIPTIONS
+    // 订阅信息，来源于环境变量 SUBSCRIPTIONS（使用 "||" 分隔多个条目，每个条目形如 "机场名=url"）
     subscriptions []Subscription
-    // 自建节点变量来自固定环境变量 CUSTOM_NODE
+    // 自建节点信息，来源于环境变量 CUSTOM_NODE（使用 "||" 分隔多个条目，原样使用）
     selfNodeConfigs []string
 
     cacheMutex     sync.Mutex
@@ -50,32 +50,30 @@ type cachedItem struct {
 }
 
 // initEnv 从环境变量中初始化 TOKEN、自建节点以及订阅机场信息。
-// 订阅数据来自固定环境变量 SUBSCRIPTIONS（多行格式，每行 "机场名 url"）。
-// 自建节点数据来自固定环境变量 CUSTOM_NODE。
+// 订阅信息来自 SUBSCRIPTIONS（多个条目，用 "||" 分隔，每个条目格式为 "机场名=url"）；
+// 自建节点信息来自 CUSTOM_NODE，也使用 "||" 分隔。
 func initEnv() {
     token = os.Getenv("TOKEN")
     if token == "" {
-        log.Fatal("TOKEN environment variable is not set")
+        log.Fatal("错误: TOKEN 环境变量未设置")
     }
 
-    // 读取固定环境变量 SUBSCRIPTIONS，按行解析，每行格式为 "机场名 url"
+    // 解析订阅信息
     subs := os.Getenv("SUBSCRIPTIONS")
     if subs != "" {
-        lines := strings.Split(subs, "\n")
-        for _, line := range lines {
-            line = strings.TrimSpace(line)
-            if line == "" {
+        entries := strings.Split(subs, "||")
+        for _, entry := range entries {
+            entry = strings.TrimSpace(entry)
+            if entry == "" {
                 continue
             }
-            // 使用 strings.Fields 分割（空白为分隔符）
-            parts := strings.Fields(line)
+            parts := strings.SplitN(entry, "=", 2)
             if len(parts) < 2 {
-                log.Printf("Invalid subscription entry: %s", line)
+                log.Printf("错误: 无效的订阅项: %s", entry)
                 continue
             }
             airportName := parts[0]
-            // URL 可能包含空格，将剩余部分拼接
-            url := strings.Join(parts[1:], " ")
+            url := parts[1]
             subscriptions = append(subscriptions, Subscription{
                 airportName: airportName,
                 url:         url,
@@ -83,11 +81,16 @@ func initEnv() {
         }
     }
 
-    // 读取自建节点信息，固定使用 CUSTOM_NODE 环境变量
-    customNode := os.Getenv("CUSTOM_NODE")
-    if customNode != "" {
-        // 注意，自建节点直接使用原始内容，不做 trim
-        selfNodeConfigs = append(selfNodeConfigs, customNode)
+    // 解析自建节点信息
+    nodes := os.Getenv("CUSTOM_NODE")
+    if nodes != "" {
+        entries := strings.Split(nodes, "||")
+        for _, entry := range entries {
+            entry = strings.TrimSpace(entry)
+            if entry != "" {
+                selfNodeConfigs = append(selfNodeConfigs, entry)
+            }
+        }
     }
 }
 
@@ -119,8 +122,8 @@ func extractProxyEntries(text string) []string {
 }
 
 // modifyProxyEntry 对订阅条目进行格式处理：
-// 拆分 "=" 后保持原始左侧（如果未包含机场名称则添加），
-// 将 URL 查询参数覆盖到配置部分后移除配置部分内的空格（如果原始无空格则无影响）。
+// 1. 保留原始左侧（如未包含机场名称则添加）；
+// 2. 将 URL 查询参数覆盖到配置部分后，移除配置部分内的所有空格。
 func modifyProxyEntry(line string, prefix string, params map[string]string) string {
     idx := strings.Index(line, "=")
     if idx == -1 {
@@ -164,10 +167,10 @@ func updateContent(r *http.Request) (string, error) {
         wg.Add(1)
         go func(s Subscription) {
             defer wg.Done()
-            log.Printf("Sending subscription request for: %s, Request Header: %+v", s.airportName, r.Header)
+            log.Printf("状态: 正在发送订阅请求，机场：%s，请求头：%+v", s.airportName, r.Header)
             req, err := http.NewRequest("GET", s.url, nil)
             if err != nil {
-                log.Printf("Failed to create request [%s]: %v", s.airportName, err)
+                log.Printf("状态: 创建请求失败 [机场：%s]，错误：%v", s.airportName, err)
                 return
             }
             if ua := r.Header.Get("user-agent"); ua != "" {
@@ -176,17 +179,17 @@ func updateContent(r *http.Request) (string, error) {
             if xsf := r.Header.Get("x-surge-unlocked-features"); xsf != "" {
                 req.Header.Set("x-surge-unlocked-features", xsf)
             }
-            log.Printf("Outgoing request for [%s] Header: %+v", s.airportName, req.Header)
+            log.Printf("状态: 正在发送请求至 [%s]，请求头：%+v", s.airportName, req.Header)
             resp, err := client.Do(req)
             if err != nil {
-                log.Printf("Request failed [%s]: %v", s.airportName, err)
+                log.Printf("状态: 请求失败 [机场：%s]，错误：%v", s.airportName, err)
                 return
             }
             defer resp.Body.Close()
-            log.Printf("Received response for [%s] Header: %+v", s.airportName, resp.Header)
+            log.Printf("状态: 已收到 [%s] 响应，响应头：%+v", s.airportName, resp.Header)
             bodyBytes, err := ioutil.ReadAll(resp.Body)
             if err != nil {
-                log.Printf("Failed to read response [%s]: %v", s.airportName, err)
+                log.Printf("状态: 读取响应失败 [机场：%s]，错误：%v", s.airportName, err)
                 return
             }
             bodyStr := string(bodyBytes)
@@ -194,9 +197,9 @@ func updateContent(r *http.Request) (string, error) {
             if len(preview) > 100 {
                 preview = preview[:100]
             }
-            log.Printf("Received response for [%s] Body Preview: %s", s.airportName, preview)
+            log.Printf("状态: [%s] 响应预览：%s", s.airportName, preview)
             if !strings.Contains(strings.ToLower(bodyStr), "[proxy]") {
-                log.Printf("Skipping [%s]: Not Surge format", s.airportName)
+                log.Printf("状态: 跳过 [%s]，原因：格式非 Surge", s.airportName)
                 return
             }
             entries := extractProxyEntries(bodyStr)
@@ -243,7 +246,7 @@ func updateContent(r *http.Request) (string, error) {
         processedSubs = append(processedSubs, v)
     }
 
-    // 处理自建节点：直接使用原始内容追加
+    // 处理自建节点：直接使用原始内容，支持用 "||" 分隔多个节点
     var selfEntries []string
     for _, config := range selfNodeConfigs {
         if config != "" {
@@ -286,7 +289,7 @@ func heartbeatHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-    log.Printf("Received client request: Method: %s, URL: %s, Host: %s, Headers: %+v",
+    log.Printf("状态: 收到客户端请求，方法：%s，URL：%s，主机：%s，请求头：%+v",
         r.Method, r.URL.String(), r.Host, r.Header)
     if r.Method == http.MethodOptions {
         w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -296,23 +299,23 @@ func handler(w http.ResponseWriter, r *http.Request) {
         return
     }
     if r.Method != http.MethodGet {
-        log.Printf("Authentication failed (method not allowed): %+v", r.Header)
-        http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+        log.Printf("状态: 鉴权失败（方法不允许）：%+v", r.Header)
+        http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
         return
     }
     if r.URL.Path != "/"+token {
-        log.Printf("Authentication failed: Request: Method: %s, URL: %s, Host: %s, Headers: %+v",
+        log.Printf("状态: 鉴权失败，访问路径错误。请求：方法：%s，URL：%s，主机：%s，请求头：%+v",
             r.Method, r.URL.String(), r.Host, r.Header)
-        http.Error(w, "Forbidden: Invalid Access Path", http.StatusForbidden)
+        http.Error(w, "禁止访问：路径无效", http.StatusForbidden)
         return
     }
 
     cacheMutex.Lock()
     if item, exists := cachedResponse["global"]; exists && time.Since(item.timestamp) < cacheDuration {
         cacheMutex.Unlock()
-        log.Printf("Cache hit. Returning cached response. Request Headers: %+v", r.Header)
+        log.Printf("状态: 缓存命中，返回缓存内容。请求头：%+v", r.Header)
         w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-        log.Printf("Returning response to client: Headers: %+v, Body: %s", w.Header(), item.content)
+        log.Printf("状态: 返回响应，响应头：%+v，内容：%s", w.Header(), item.content)
         w.Write([]byte(item.content))
         return
     }
@@ -325,19 +328,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
         return updateContent(r)
     })
     if err != nil {
-        http.Error(w, "Failed to update content", http.StatusInternalServerError)
+        http.Error(w, "更新内容失败", http.StatusInternalServerError)
         return
     }
     mergedConfig, ok := result.(string)
     if !ok {
-        http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+        http.Error(w, "内部错误", http.StatusInternalServerError)
         return
     }
     cacheMutex.Lock()
     cachedResponse["global"] = cachedItem{timestamp: time.Now(), content: mergedConfig}
     cacheMutex.Unlock()
     w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-    log.Printf("Returning new response to client: Headers: %+v, Body: %s", w.Header(), mergedConfig)
+    log.Printf("状态: 返回新响应，响应头：%+v，内容：%s", w.Header(), mergedConfig)
     fmt.Fprint(w, mergedConfig)
 }
 
@@ -346,10 +349,10 @@ func main() {
     http.HandleFunc("/heartbeat", heartbeatHandler)
     http.HandleFunc("/", handler)
     
-    // 端口固定为3000
+    // 固定端口为 3000
     port := "3000"
     addr := ":" + port
     // 版本号由 ldflags 注入到全局变量 version 中
-    log.Printf("Server started. Version: %s, Listening on %s", version, addr)
+    log.Printf("状态: 服务器已启动，版本：%s，监听地址：%s", version, addr)
     log.Fatal(http.ListenAndServe(addr, nil))
 }
