@@ -10,12 +10,16 @@ import (
     "regexp"
     "strings"
     "sync"
+    "sync/atomic"
     "time"
 
     "golang.org/x/sync/singleflight"
 )
 
 var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=your-version"
+
+// 全局客户端请求计数（使用原子计数）
+var requestCount int64
 
 type Subscription struct {
     airportName string
@@ -25,16 +29,16 @@ type Subscription struct {
 var (
     token string
 
-    // paramMap 将 URL 查询参数中的简写映射为完整配置参数名
+    // paramMap: 将 URL 查询参数中的简写映射为完整配置参数名
     paramMap = map[string]string{
         "udp":  "udp-relay",
         "tfo":  "tfo",
         "quic": "block-quic",
     }
 
-    // 订阅信息，来源于环境变量 SUBSCRIPTIONS（使用 "||" 分隔多个条目，每个条目形如 "机场名=url"）
+    // 订阅信息，来源于环境变量 SUBSCRIPTIONS（多个条目用 "||" 分隔，每个条目格式为 "机场名=url"）
     subscriptions []Subscription
-    // 自建节点信息，来源于环境变量 CUSTOM_NODE（使用 "||" 分隔多个条目，原样使用）
+    // 自建节点，来源于环境变量 CUSTOM_NODE（多个条目用 "||" 分隔），直接原样使用
     selfNodeConfigs []string
 
     cacheMutex     sync.Mutex
@@ -49,9 +53,9 @@ type cachedItem struct {
     content   string
 }
 
-// initEnv 从环境变量中初始化 TOKEN、自建节点以及订阅机场信息。
-// 订阅信息来自 SUBSCRIPTIONS（多个条目，用 "||" 分隔，每个条目格式为 "机场名=url"）；
-// 自建节点信息来自 CUSTOM_NODE，也使用 "||" 分隔。
+// initEnv 从环境变量中初始化 TOKEN、自建节点及订阅机场信息。
+// 订阅信息使用固定环境变量 SUBSCRIPTIONS，格式为多个条目，使用 "||" 分隔，每个形如 "机场名=url"；
+// 自建节点使用环境变量 CUSTOM_NODE，同样使用 "||" 分隔。
 func initEnv() {
     token = os.Getenv("TOKEN")
     if token == "" {
@@ -122,8 +126,8 @@ func extractProxyEntries(text string) []string {
 }
 
 // modifyProxyEntry 对订阅条目进行格式处理：
-// 1. 保留原始左侧（如未包含机场名称则添加）；
-// 2. 将 URL 查询参数覆盖到配置部分后，移除配置部分内的所有空格。
+// 1. 保留原始左侧（若未包含机场名称则添加）；
+// 2. 将 URL 查询参数覆盖到配置部分后，移除配置部分内所有空格。
 func modifyProxyEntry(line string, prefix string, params map[string]string) string {
     idx := strings.Index(line, "=")
     if idx == -1 {
@@ -157,20 +161,22 @@ func processQueryParams(query map[string][]string) map[string]string {
     return result
 }
 
+// updateContent 从上游订阅获取配置，超时设置为6秒。
 func updateContent(r *http.Request) (string, error) {
     var subEntries []string
     var mu sync.Mutex
-    client := &http.Client{}
+    // 设置上游请求超时为6秒
+    client := &http.Client{Timeout: 6 * time.Second}
     var wg sync.WaitGroup
 
     for _, sub := range subscriptions {
         wg.Add(1)
         go func(s Subscription) {
             defer wg.Done()
-            log.Printf("状态: 正在发送订阅请求，机场：%s，请求头：%+v", s.airportName, r.Header)
+            log.Printf("发送订阅请求，机场：%s，请求头：%+v", s.airportName, r.Header)
             req, err := http.NewRequest("GET", s.url, nil)
             if err != nil {
-                log.Printf("状态: 创建请求失败 [机场：%s]，错误：%v", s.airportName, err)
+                log.Printf("创建请求失败 [机场：%s]，错误：%v", s.airportName, err)
                 return
             }
             if ua := r.Header.Get("user-agent"); ua != "" {
@@ -179,17 +185,17 @@ func updateContent(r *http.Request) (string, error) {
             if xsf := r.Header.Get("x-surge-unlocked-features"); xsf != "" {
                 req.Header.Set("x-surge-unlocked-features", xsf)
             }
-            log.Printf("状态: 正在发送请求至 [%s]，请求头：%+v", s.airportName, req.Header)
+            log.Printf("发送请求至 [%s]，请求头：%+v", s.airportName, req.Header)
             resp, err := client.Do(req)
             if err != nil {
-                log.Printf("状态: 请求失败 [机场：%s]，错误：%v", s.airportName, err)
+                log.Printf("请求失败 [机场：%s]，错误：%v", s.airportName, err)
                 return
             }
             defer resp.Body.Close()
-            log.Printf("状态: 已收到 [%s] 响应，响应头：%+v", s.airportName, resp.Header)
+            log.Printf("收到 [%s] 响应，响应头：%+v", s.airportName, resp.Header)
             bodyBytes, err := ioutil.ReadAll(resp.Body)
             if err != nil {
-                log.Printf("状态: 读取响应失败 [机场：%s]，错误：%v", s.airportName, err)
+                log.Printf("读取响应失败 [机场：%s]，错误：%v", s.airportName, err)
                 return
             }
             bodyStr := string(bodyBytes)
@@ -197,9 +203,9 @@ func updateContent(r *http.Request) (string, error) {
             if len(preview) > 100 {
                 preview = preview[:100]
             }
-            log.Printf("状态: [%s] 响应预览：%s", s.airportName, preview)
+            log.Printf("[%s] 响应预览：%s", s.airportName, preview)
             if !strings.Contains(strings.ToLower(bodyStr), "[proxy]") {
-                log.Printf("状态: 跳过 [%s]，原因：格式非 Surge", s.airportName)
+                log.Printf("跳过 [%s]，格式非 Surge", s.airportName)
                 return
             }
             entries := extractProxyEntries(bodyStr)
@@ -246,7 +252,7 @@ func updateContent(r *http.Request) (string, error) {
         processedSubs = append(processedSubs, v)
     }
 
-    // 处理自建节点：直接使用原始内容，支持用 "||" 分隔多个节点
+    // 处理自建节点：直接使用原始内容（支持用 "||" 分隔多个节点）
     var selfEntries []string
     for _, config := range selfNodeConfigs {
         if config != "" {
@@ -259,38 +265,11 @@ func updateContent(r *http.Request) (string, error) {
     return finalConfig, nil
 }
 
-func heartbeat(ctx context.Context, w http.ResponseWriter) {
-    select {
-    case <-time.After(1 * time.Second):
-    case <-ctx.Done():
-        return
-    }
-    ticker := time.NewTicker(1 * time.Second)
-    defer ticker.Stop()
-    timeout := time.After(30 * time.Second)
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        case <-ticker.C:
-            if flusher, ok := w.(http.Flusher); ok {
-                flusher.Flush()
-            }
-        case <-timeout:
-            return
-        }
-    }
-}
-
-func heartbeatHandler(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "text/plain")
-    w.WriteHeader(http.StatusOK)
-    fmt.Fprint(w, "pong")
-}
-
 func handler(w http.ResponseWriter, r *http.Request) {
-    log.Printf("状态: 收到客户端请求，方法：%s，URL：%s，主机：%s，请求头：%+v",
-        r.Method, r.URL.String(), r.Host, r.Header)
+    // 为每个请求计数并获得计数编号
+    reqNum := atomic.AddInt64(&requestCount, 1)
+    log.Printf("收到客户端请求 #%d，方法：%s，URL：%s，主机：%s，请求头：%+v",
+        reqNum, r.Method, r.URL.String(), r.Host, r.Header)
     if r.Method == http.MethodOptions {
         w.Header().Set("Access-Control-Allow-Origin", "*")
         w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -299,13 +278,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
         return
     }
     if r.Method != http.MethodGet {
-        log.Printf("状态: 鉴权失败（方法不允许）：%+v", r.Header)
+        log.Printf("鉴权失败（方法不允许） #%d，请求头：%+v", reqNum, r.Header)
         http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
         return
     }
     if r.URL.Path != "/"+token {
-        log.Printf("状态: 鉴权失败，访问路径错误。请求：方法：%s，URL：%s，主机：%s，请求头：%+v",
-            r.Method, r.URL.String(), r.Host, r.Header)
+        log.Printf("鉴权失败，路径错误 #%d，方法：%s，URL：%s，主机：%s，请求头：%+v",
+            reqNum, r.Method, r.URL.String(), r.Host, r.Header)
         http.Error(w, "禁止访问：路径无效", http.StatusForbidden)
         return
     }
@@ -313,17 +292,15 @@ func handler(w http.ResponseWriter, r *http.Request) {
     cacheMutex.Lock()
     if item, exists := cachedResponse["global"]; exists && time.Since(item.timestamp) < cacheDuration {
         cacheMutex.Unlock()
-        log.Printf("状态: 缓存命中，返回缓存内容。请求头：%+v", r.Header)
+        log.Printf("缓存命中，返回缓存内容 #%d，请求头：%+v", reqNum, r.Header)
         w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-        log.Printf("状态: 返回响应，响应头：%+v，内容：%s", w.Header(), item.content)
+        log.Printf("返回响应 #%d，响应头：%+v，内容：%s", reqNum, w.Header(), item.content)
         w.Write([]byte(item.content))
         return
     }
     cacheMutex.Unlock()
 
-    ctx, cancel := context.WithCancel(r.Context())
-    defer cancel()
-    go heartbeat(ctx, w)
+    // 调用上游更新配置
     result, err, _ := sfGroup.Do("update", func() (interface{}, error) {
         return updateContent(r)
     })
@@ -340,19 +317,24 @@ func handler(w http.ResponseWriter, r *http.Request) {
     cachedResponse["global"] = cachedItem{timestamp: time.Now(), content: mergedConfig}
     cacheMutex.Unlock()
     w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-    log.Printf("状态: 返回新响应，响应头：%+v，内容：%s", w.Header(), mergedConfig)
+    log.Printf("返回新响应 #%d，响应头：%+v，内容：%s", reqNum, w.Header(), mergedConfig)
     fmt.Fprint(w, mergedConfig)
 }
 
 func main() {
     initEnv()
-    http.HandleFunc("/heartbeat", heartbeatHandler)
+    http.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+        // 如需心跳接口，可保留简单实现；这里直接返回"pong"
+        w.Header().Set("Content-Type", "text/plain")
+        w.WriteHeader(http.StatusOK)
+        fmt.Fprint(w, "pong")
+    })
     http.HandleFunc("/", handler)
-    
-    // 固定端口为 3000
+
+    // 端口固定为3000
     port := "3000"
     addr := ":" + port
-    // 版本号由 ldflags 注入到全局变量 version 中
-    log.Printf("状态: 服务器已启动，版本：%s，监听地址：%s", version, addr)
+    // 日志中输出版本号（由 ldflags 注入）和监听地址
+    log.Printf("服务器已启动，版本：%s，监听地址：%s", version, addr)
     log.Fatal(http.ListenAndServe(addr, nil))
 }
