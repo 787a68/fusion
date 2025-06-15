@@ -842,36 +842,40 @@ func checkCache() error {
 }
 
 // 应用参数
-func applyParams(content string, query url.Values) (string, error) {
-    var result []string
+func applyParams(content string, query url.Values) string {
     lines := strings.Split(content, "\n")
+    var result []string
 
     for _, line := range lines {
-        node := parseNode(line)
-        if node == nil {
+        if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+            result = append(result, line)
             continue
         }
 
+        parts := strings.SplitN(line, "=", 2)
+        if len(parts) != 2 {
+            result = append(result, line)
+            continue
+        }
+
+        name := strings.TrimSpace(parts[0])
+        value := strings.TrimSpace(parts[1])
+
         // 应用参数
-        for param, value := range query {
-            if fullParam, ok := paramMap[param]; ok {
-                node.params[fullParam] = value[0]
+        for param, values := range query {
+            if mappedParam, ok := paramMap[param]; ok {
+                if values[0] == "true" {
+                    value = fmt.Sprintf("%s, %s=true", value, mappedParam)
+                } else if values[0] == "false" {
+                    value = fmt.Sprintf("%s, %s=false", value, mappedParam)
+                }
             }
         }
 
-        // 处理布尔值参数
-        for k, v := range node.params {
-            if v == "true" {
-                node.params[k] = "1"
-            } else if v == "false" {
-                node.params[k] = "0"
-            }
-        }
-
-        result = append(result, buildNodeString(node))
+        result = append(result, fmt.Sprintf("%s=%s", name, value))
     }
 
-    return strings.Join(result, "\n"), nil
+    return strings.Join(result, "\n")
 }
 
 // 其他辅助函数

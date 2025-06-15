@@ -9,7 +9,8 @@ RUN go mod init fusion && \
     go mod tidy && \
     go mod download
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o fusion
+# 显示详细的构建错误
+RUN CGO_ENABLED=0 GOOS=linux go build -v -x -o fusion
 
 FROM alpine:latest
 
