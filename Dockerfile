@@ -4,7 +4,11 @@ WORKDIR /app
 
 COPY . .
 
-RUN go mod download
+# 初始化并更新依赖
+RUN go mod init fusion && \
+    go mod tidy && \
+    go mod download
+
 RUN CGO_ENABLED=0 GOOS=linux go build -o fusion
 
 FROM alpine:latest
