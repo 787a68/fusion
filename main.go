@@ -293,14 +293,38 @@ func forceUpdate() error {
 
 // 处理请求
 func processRequest(r *http.Request) (string, error) {
-    // 读取缓存
-    content, err := getCachedContent("default")
-    if err != nil {
-        return "", err
+    // 检查是否需要强制更新
+    if r.URL.Query().Get("f") != "" {
+        // 异步更新
+        go func() {
+            if err := forceUpdate(); err != nil {
+                writeLog("ERROR", fmt.Sprintf("强制更新失败: %v", err), 0, r, 0)
+            }
+        }()
+        return "", nil
     }
 
-    // 应用参数
-    return applyParams(content, r.URL.Query())
+    // 读取缓存
+    cacheMutex.RLock()
+    item, exists := cachedResponse["default"]
+    cacheMutex.RUnlock()
+
+    if !exists {
+        // 如果缓存不存在，执行同步更新
+        if err := forceUpdate(); err != nil {
+            return "", fmt.Errorf("更新失败: %v", err)
+        }
+        // 重新读取缓存
+        cacheMutex.RLock()
+        item, exists = cachedResponse["default"]
+        cacheMutex.RUnlock()
+        if !exists {
+            return "", fmt.Errorf("更新后缓存仍然不存在")
+        }
+    }
+
+    // 应用 URL 参数
+    return applyParams(item.content, r.URL.Query()), nil
 }
 
 // 获取所有节点
@@ -883,8 +907,8 @@ func writeLog(level, message string, requestID int64, r *http.Request, status in
 
 // 缓存相关函数
 func getCachedContent(key string) (string, bool) {
-    cacheMutex.Lock()
-    defer cacheMutex.Unlock()
+    cacheMutex.RLock()
+    defer cacheMutex.RUnlock()
 
     if item, ok := cachedResponse[key]; ok {
         if time.Since(item.timestamp) < cacheDuration {

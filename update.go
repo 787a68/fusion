@@ -1,6 +1,7 @@
 package main
 
 import (
+    "encoding/base64"
     "encoding/json"
     "fmt"
     "io/ioutil"
@@ -25,6 +26,213 @@ var (
         },
     }
 )
+
+// 创建代理客户端
+func createProxyClient(node *Node) (*http.Client, error) {
+    if node == nil {
+        return nil, fmt.Errorf("节点不能为空")
+    }
+
+    var proxyURL string
+    switch node.protocol {
+    case "ss":
+        proxyURL = createSSProxyURL(node)
+    case "trojan":
+        proxyURL = createTrojanProxyURL(node)
+    case "vmess":
+        proxyURL = createVmessProxyURL(node)
+    default:
+        return nil, fmt.Errorf("不支持的代理协议: %s", node.protocol)
+    }
+
+    proxy, err := url.Parse(proxyURL)
+    if err != nil {
+        return nil, fmt.Errorf("解析代理 URL 失败: %v", err)
+    }
+
+    return &http.Client{
+        Timeout: 10 * time.Second,
+        Transport: &http.Transport{
+            Proxy: http.ProxyURL(proxy),
+            DialContext: (&net.Dialer{
+                Timeout:   30 * time.Second,
+                KeepAlive: 30 * time.Second,
+            }).DialContext,
+            MaxIdleConns:          100,
+            IdleConnTimeout:       90 * time.Second,
+            TLSHandshakeTimeout:   10 * time.Second,
+            ExpectContinueTimeout: 1 * time.Second,
+        },
+    }, nil
+}
+
+// 创建 SS 代理 URL
+func createSSProxyURL(node *Node) string {
+    params := url.Values{}
+    for k, v := range node.params {
+        params.Set(k, v)
+    }
+    return fmt.Sprintf("ss://%s@%s:%s?%s", node.params["password"], node.server, node.port, params.Encode())
+}
+
+// 创建 Trojan 代理 URL
+func createTrojanProxyURL(node *Node) string {
+    params := url.Values{}
+    for k, v := range node.params {
+        params.Set(k, v)
+    }
+    return fmt.Sprintf("trojan://%s@%s:%s?%s", node.params["password"], node.server, node.port, params.Encode())
+}
+
+// 创建 Vmess 代理 URL
+func createVmessProxyURL(node *Node) string {
+    vmessConfig := map[string]interface{}{
+        "v":    "2",
+        "ps":   node.fullName,
+        "add":  node.server,
+        "port": node.port,
+        "id":   node.params["uuid"],
+        "aid":  node.params["alterId"],
+        "net":  node.params["network"],
+        "type": "none",
+        "host": node.params["host"],
+        "path": node.params["path"],
+        "tls":  node.params["tls"],
+    }
+    configJSON, _ := json.Marshal(vmessConfig)
+    return fmt.Sprintf("vmess://%s", base64.StdEncoding.EncodeToString(configJSON))
+}
+
+// 解析节点
+func parseNode(line string) *Node {
+    parts := strings.SplitN(line, "=", 2)
+    if len(parts) != 2 {
+        return nil
+    }
+
+    name := strings.TrimSpace(parts[0])
+    value := strings.TrimSpace(parts[1])
+
+    // 解析节点配置
+    node := &Node{
+        params: make(map[string]string),
+    }
+
+    // 解析协议
+    if strings.HasPrefix(value, "ss://") {
+        node.protocol = "ss"
+        if err := parseSSNode(value, node); err != nil {
+            return nil
+        }
+    } else if strings.HasPrefix(value, "trojan://") {
+        node.protocol = "trojan"
+        if err := parseTrojanNode(value, node); err != nil {
+            return nil
+        }
+    } else if strings.HasPrefix(value, "vmess://") {
+        node.protocol = "vmess"
+        if err := parseVmessNode(value, node); err != nil {
+            return nil
+        }
+    } else {
+        return nil
+    }
+
+    node.fullName = name
+    return node
+}
+
+// 解析 SS 节点
+func parseSSNode(urlStr string, node *Node) error {
+    // 移除 ss:// 前缀
+    urlStr = strings.TrimPrefix(urlStr, "ss://")
+    
+    // 解析 URL
+    u, err := url.Parse(urlStr)
+    if err != nil {
+        return err
+    }
+
+    // 解析服务器地址和端口
+    host, port, err := net.SplitHostPort(u.Host)
+    if err != nil {
+        return err
+    }
+
+    node.server = host
+    node.port = port
+
+    // 解析参数
+    query := u.Query()
+    for k, v := range query {
+        if len(v) > 0 {
+            node.params[k] = v[0]
+        }
+    }
+
+    return nil
+}
+
+// 解析 Trojan 节点
+func parseTrojanNode(urlStr string, node *Node) error {
+    // 移除 trojan:// 前缀
+    urlStr = strings.TrimPrefix(urlStr, "trojan://")
+    
+    // 解析 URL
+    u, err := url.Parse(urlStr)
+    if err != nil {
+        return err
+    }
+
+    // 解析服务器地址和端口
+    host, port, err := net.SplitHostPort(u.Host)
+    if err != nil {
+        return err
+    }
+
+    node.server = host
+    node.port = port
+
+    // 解析参数
+    query := u.Query()
+    for k, v := range query {
+        if len(v) > 0 {
+            node.params[k] = v[0]
+        }
+    }
+
+    return nil
+}
+
+// 解析 Vmess 节点
+func parseVmessNode(urlStr string, node *Node) error {
+    // 移除 vmess:// 前缀
+    urlStr = strings.TrimPrefix(urlStr, "vmess://")
+    
+    // Base64 解码
+    data, err := base64.StdEncoding.DecodeString(urlStr)
+    if err != nil {
+        return err
+    }
+
+    // 解析 JSON
+    var config map[string]interface{}
+    if err := json.Unmarshal(data, &config); err != nil {
+        return err
+    }
+
+    // 设置基本参数
+    node.server = config["add"].(string)
+    node.port = fmt.Sprintf("%v", config["port"])
+    node.params["uuid"] = config["id"].(string)
+    node.params["alterId"] = fmt.Sprintf("%v", config["aid"])
+    node.params["network"] = config["net"].(string)
+    node.params["host"] = config["host"].(string)
+    node.params["path"] = config["path"].(string)
+    node.params["tls"] = config["tls"].(string)
+
+    return nil
+}
 
 // 强制更新
 func forceUpdate() error {
@@ -256,6 +464,7 @@ func getIPsForDomain(domain string) ([]string, error) {
     var wg sync.WaitGroup
     errChan := make(chan error, len(dnsServers))
     successChan := make(chan struct{})
+    timeout := time.After(5 * time.Second)
 
     for _, dnsServer := range dnsServers {
         wg.Add(1)
@@ -275,9 +484,15 @@ func getIPsForDomain(domain string) ([]string, error) {
                     ips = append(ips, ip)
                 }
                 mu.Unlock()
-                successChan <- struct{}{}
+                select {
+                case successChan <- struct{}{}:
+                case <-timeout:
+                }
             } else if err != nil {
-                errChan <- err
+                select {
+                case errChan <- err:
+                case <-timeout:
+                }
             }
         }(dnsServer)
     }
@@ -291,20 +506,23 @@ func getIPsForDomain(domain string) ([]string, error) {
 
     // 检查是否有成功
     successCount := 0
-    for range successChan {
-        successCount++
-    }
-
-    // 如果没有成功，返回错误
-    if successCount == 0 {
-        var errs []string
-        for err := range errChan {
-            errs = append(errs, err.Error())
+    for {
+        select {
+        case <-successChan:
+            successCount++
+        case <-timeout:
+            if successCount == 0 {
+                var errs []string
+                for err := range errChan {
+                    errs = append(errs, err.Error())
+                }
+                return nil, fmt.Errorf("DNS 查询超时: %s", strings.Join(errs, "; "))
+            }
+            return ips, nil
+        case <-errChan:
+            // 继续等待成功
         }
-        return nil, fmt.Errorf("所有 DNS 查询失败: %s", strings.Join(errs, "; "))
     }
-
-    return ips, nil
 }
 
 // 查询 DNS
@@ -327,4 +545,103 @@ func queryDNS(domain, dnsServer string) (string, error) {
     }
 
     return "", nil
+}
+
+// 处理节点
+func processNodes(nodes []*Node, params url.Values) string {
+    var results []string
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+    errChan := make(chan error, len(nodes))
+
+    // 添加代理部分标记
+    results = append(results, "[Proxy]")
+
+    for _, node := range nodes {
+        wg.Add(1)
+        go func(n *Node) {
+            defer wg.Done()
+
+            // 处理域名
+            processedNodes, err := processNodeDomain(n)
+            if err != nil {
+                errChan <- fmt.Errorf("处理域名失败 %s: %v", n.server, err)
+                return
+            }
+
+            // 处理每个节点
+            for _, processedNode := range processedNodes {
+                // 处理 SNI
+                if err := processNodeSNI(processedNode); err != nil {
+                    errChan <- fmt.Errorf("处理 SNI 失败 %s: %v", processedNode.server, err)
+                    continue
+                }
+
+                // 获取国家信息
+                country, emoji, err := getNodeCountry(processedNode)
+                if err != nil {
+                    errChan <- fmt.Errorf("获取国家信息失败 %s: %v", processedNode.server, err)
+                    continue
+                }
+
+                // 更新节点名称
+                processedNode.fullName = fmt.Sprintf("%s %s %s", processedNode.fullName, emoji, country)
+
+                // 构建节点字符串
+                nodeStr := buildNodeString(processedNode, params)
+
+                mu.Lock()
+                results = append(results, nodeStr)
+                mu.Unlock()
+            }
+        }(node)
+    }
+
+    wg.Wait()
+    close(errChan)
+
+    // 检查错误
+    for err := range errChan {
+        writeLog("ERROR", err.Error(), 0, nil, 0)
+    }
+
+    // 添加规则部分
+    results = append(results, "\n[Rule]")
+    results = append(results, "FINAL,DIRECT")
+
+    return strings.Join(results, "\n")
+}
+
+// 构建节点字符串
+func buildNodeString(node *Node, params url.Values) string {
+    var parts []string
+
+    // 添加基本参数
+    switch node.protocol {
+    case "ss":
+        parts = append(parts, fmt.Sprintf("%s = ss, %s, %s, encrypt-method=%s, password=%s",
+            node.fullName, node.server, node.port, node.params["method"], node.params["password"]))
+    case "trojan":
+        parts = append(parts, fmt.Sprintf("%s = trojan, %s, %s, password=%s",
+            node.fullName, node.server, node.port, node.params["password"]))
+    case "vmess":
+        parts = append(parts, fmt.Sprintf("%s = vmess, %s, %s, username=%s, ws=true, tls=true",
+            node.fullName, node.server, node.port, node.params["uuid"]))
+    }
+
+    // 添加其他参数
+    for k, v := range node.params {
+        if k != "method" && k != "password" && k != "uuid" {
+            parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+        }
+    }
+
+    // 添加 URL 参数
+    for k, v := range params {
+        if mappedParam, ok := paramMap[k]; ok {
+            parts = append(parts, fmt.Sprintf("%s=%s", mappedParam, v[0]))
+        }
+    }
+
+    return strings.Join(parts, ", ")
 } 
