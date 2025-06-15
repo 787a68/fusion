@@ -1,11 +1,17 @@
 package main
 
 import (
+    "crypto/rand"
+    "encoding/base64"
+    "encoding/json"
     "fmt"
     "io/ioutil"
     "log"
+    "net"
     "net/http"
+    "net/url"
     "os"
+    "path/filepath"
     "regexp"
     "sort"
     "strings"
@@ -13,315 +19,1013 @@ import (
     "sync/atomic"
     "time"
 
+    "github.com/miekg/dns"
     "golang.org/x/sync/singleflight"
 )
 
-var version string // 版本号通过 ldflags 注入，例如：-ldflags "-X main.version=your-version"
-
-var requestCount int64 // 客户端请求计数（原子操作）
-
-type Subscription struct {
-    airportName string
-    url         string
-}
-
+// 全局变量
 var (
-    token string
+    // 基础配置
+    dataDir      string
+    token        string
+    requestCount int64
+    logFile      *os.File
+    logMutex     sync.Mutex
 
-    // paramMap：将 URL 查询参数中的简写映射为完整配置参数名称
+    // 缓存相关
+    cacheMutex     sync.Mutex
+    cachedResponse = make(map[string]cachedItem)
+    cacheDuration  = 24 * time.Hour
+    sfGroup        singleflight.Group
+
+    // 节点配置
+    subscriptions []Subscription
+
+    // 参数映射
     paramMap = map[string]string{
         "udp":  "udp-relay",
         "tfo":  "tfo",
         "quic": "block-quic",
     }
 
-    // 订阅节点信息，从环境变量 SUBSCRIPTIONS 读取，每个条目格式为 "名称=url"，多个条目以 "||" 分隔
-    subscriptions []Subscription
-    // 自建节点信息，从环境变量 CUSTOM_NODE 读取，同样以 "||" 分隔，内容直接原样使用
-    selfNodeConfigs []string
+    // DNS 服务器列表
+    dnsServers = []string{
+        "8.8.8.8",
+        "1.1.1.1",
+        "114.114.114.114",
+    }
 
-    cacheMutex     sync.Mutex
-    cachedResponse = make(map[string]cachedItem)
-    cacheDuration  = 5 * time.Minute
+    // 固定 User-Agent
+    surgeUA = "Surge/4.0"
 
-    sfGroup singleflight.Group // 保证同一时间只有一次更新操作
+    // DNS 客户端配置
+    dnsClient = &dns.Client{
+        Net:     "udp",
+        Timeout: 5 * time.Second,
+    }
+
+    // 地理位置 API 配置
+    geoAPIURL = "http://ip-api.com/json/"
+    geoClient = &http.Client{
+        Timeout: 10 * time.Second,
+        Transport: &http.Transport{
+            Proxy: nil, // 禁用系统代理
+        },
+    }
+
+    // 国家代码到国旗 emoji 的映射
+    countryEmoji = map[string]string{
+        "US": "🇺🇸", "JP": "🇯🇵", "SG": "🇸🇬", "HK": "🇭🇰", "TW": "🇹🇼",
+        "KR": "🇰🇷", "GB": "🇬🇧", "DE": "🇩🇪", "FR": "🇫🇷", "IT": "🇮🇹",
+        "NL": "🇳🇱", "CA": "🇨🇦", "AU": "🇦🇺", "NZ": "🇳🇿", "RU": "🇷🇺",
+        "BR": "🇧🇷", "IN": "🇮🇳", "ID": "🇮🇩", "MY": "🇲🇾", "TH": "🇹🇭",
+        "VN": "🇻🇳", "PH": "🇵🇭", "AE": "🇦🇪", "SA": "🇸🇦", "TR": "🇹🇷",
+    }
+
+    // 默认国家代码和 emoji
+    defaultCountry = "n"
+    defaultEmoji   = "🇺🇸"
 )
 
-type cachedItem struct {
-    timestamp time.Time
-    content   string
-}
-
-// initEnv 从环境变量中初始化 TOKEN、自建节点和订阅节点信息。
-// 例如：
-//   SUBSCRIPTIONS=ENET=https://106.75.141.41/YT||CNA=https://yuntong.one/yt?token=87
-//   CUSTOM_NODE=自建节点1配置||自建节点2配置
-func initEnv() {
-    token = os.Getenv("TOKEN")
-    if token == "" {
-        log.Fatal("错误: TOKEN 环境变量未设置")
+// 数据结构定义
+type (
+    // 订阅配置
+    Subscription struct {
+        airportName string
+        url         string
     }
 
-    // 解析订阅节点信息
-    subs := os.Getenv("SUBSCRIPTIONS")
-    if subs != "" {
-        entries := strings.Split(subs, "||")
-        for _, entry := range entries {
-            entry = strings.TrimSpace(entry)
-            if entry == "" {
-                continue
+    // 节点信息
+    Node struct {
+        fullName    string
+        protocol    string
+        server      string
+        port        string
+        params      map[string]string
+        country     string
+        emoji       string
+        entryPoint  string // 入口点（域名或IP）
+        isDomain    bool   // 是否是域名
+    }
+
+    // 缓存项
+    cachedItem struct {
+        timestamp time.Time
+        content   string
+    }
+
+    // 日志条目
+    LogEntry struct {
+        Timestamp string `json:"timestamp"`
+        Level     string `json:"level"`
+        Message   string `json:"message"`
+        RequestID int64  `json:"request_id,omitempty"`
+        URL       string `json:"url,omitempty"`
+        Method    string `json:"method,omitempty"`
+        Status    int    `json:"status,omitempty"`
+    }
+)
+
+// 初始化函数
+func init() {
+    log.SetFlags(0)
+}
+
+// 主函数
+func main() {
+    // 1. 初始化环境
+    if err := initEnv(); err != nil {
+        log.Fatalf("初始化环境失败: %v", err)
+    }
+
+    // 2. 启动缓存检查
+    go startCacheCheck()
+
+    // 3. 启动 HTTP 服务器
+    http.HandleFunc("/fusion", handler)
+    log.Printf("服务器启动成功，监听端口 8080")
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+// 环境初始化
+func initEnv() error {
+    // 1. 设置数据目录
+    if err := setupDataDir(); err != nil {
+        return fmt.Errorf("设置数据目录失败: %v", err)
+    }
+
+    // 2. 设置日志
+    if err := setupLogging(); err != nil {
+        return fmt.Errorf("设置日志失败: %v", err)
+    }
+
+    // 3. 加载缓存
+    if err := loadCache(); err != nil {
+        log.Printf("加载缓存失败: %v", err)
+    }
+
+    // 4. 初始化 token
+    if err := initToken(); err != nil {
+        return fmt.Errorf("初始化 token 失败: %v", err)
+    }
+
+    // 5. 加载配置
+    if err := loadConfig(); err != nil {
+        return fmt.Errorf("加载配置失败: %v", err)
+    }
+
+    return nil
+}
+
+// 设置数据目录
+func setupDataDir() error {
+    dataDir = os.Getenv("DATA_DIR")
+    if dataDir == "" {
+        dataDir = "data"
+    }
+    return os.MkdirAll(dataDir, 0755)
+}
+
+// 设置日志
+func setupLogging() error {
+    logFileName := filepath.Join(dataDir, fmt.Sprintf("fusion_%s.log", time.Now().Format("2006-01-02")))
+    f, err := os.OpenFile(logFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        return err
+    }
+    logFile = f
+    log.SetOutput(f)
+    return nil
+}
+
+// 初始化 token
+func initToken() error {
+    if token = os.Getenv("TOKEN"); token == "" {
+        var err error
+        token, err = loadToken()
+        if err != nil {
+            return err
+        }
+        if token == "" {
+            token, err = generateToken()
+            if err != nil {
+                return err
             }
-            parts := strings.SplitN(entry, "=", 2)
-            if len(parts) < 2 {
-                log.Printf("错误: 无效的订阅项: %s", entry)
-                continue
+            if err := saveToken(); err != nil {
+                return err
             }
-            name := parts[0]
-            url := parts[1]
-            subscriptions = append(subscriptions, Subscription{
-                airportName: name,
-                url:         url,
-            })
+            writeLog("INFO", fmt.Sprintf("自动生成的 TOKEN: %s", token), 0, nil, 0)
         }
     }
+    return nil
+}
 
-    // 解析自建节点信息
-    nodes := os.Getenv("CUSTOM_NODE")
-    if nodes != "" {
-        entries := strings.Split(nodes, "||")
-        for _, entry := range entries {
-            entry = strings.TrimSpace(entry)
-            if entry != "" {
-                selfNodeConfigs = append(selfNodeConfigs, entry)
+// 加载配置
+func loadConfig() error {
+    // 加载订阅配置
+    if subs := os.Getenv("SUBSCRIPTIONS"); subs != "" {
+        for _, entry := range strings.Split(subs, ",") {
+            if parts := strings.SplitN(strings.TrimSpace(entry), "=", 2); len(parts) == 2 {
+                subscriptions = append(subscriptions, Subscription{
+                    airportName: parts[0],
+                    url:         parts[1],
+                })
             }
         }
     }
+    return nil
 }
 
-func cleanLine(line string) string {
-    re := regexp.MustCompile(`\s*(//|#).*`)
-    return strings.TrimSpace(re.ReplaceAllString(line, ""))
-}
+// HTTP 处理器
+func handler(w http.ResponseWriter, r *http.Request) {
+    requestID := atomic.AddInt64(&requestCount, 1)
+    writeLog("INFO", "收到请求", requestID, r, 0)
 
-func extractProxyEntries(text string) []string {
-    lines := strings.Split(text, "\n")
-    var entries []string
-    inProxySection := false
-    for _, line := range lines {
-        trimmed := strings.TrimSpace(line)
-        if !inProxySection {
-            if strings.ToLower(trimmed) == "[proxy]" {
-                inProxySection = true
+    // 验证 token
+    if r.URL.Query().Get("t") != token {
+        writeLog("ERROR", "无效的 token", requestID, r, http.StatusUnauthorized)
+        http.Error(w, "", http.StatusUnauthorized)
+        return
+    }
+
+    // 检查是否需要强制更新
+    if r.URL.Query().Has("f") {
+        // 启动异步更新
+        go func() {
+            if err := forceUpdate(); err != nil {
+                writeLog("ERROR", fmt.Sprintf("强制更新失败: %v", err), requestID, nil, 0)
             }
-        } else {
-            if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-                break
-            }
-            if trimmed != "" && strings.Contains(trimmed, "=") {
-                entries = append(entries, trimmed)
-            }
-        }
+        }()
+        // 立即返回
+        w.WriteHeader(http.StatusOK)
+        return
     }
-    return entries
+
+    // 处理普通请求
+    content, err := processRequest(r)
+    if err != nil {
+        writeLog("ERROR", err.Error(), requestID, r, http.StatusInternalServerError)
+        http.Error(w, "", http.StatusInternalServerError)
+        return
+    }
+
+    // 返回响应
+    w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+    w.Write([]byte(content))
+    writeLog("INFO", "请求处理完成", requestID, r, http.StatusOK)
 }
 
-// modifyProxyEntry 对订阅条目进行格式处理：
-// 1. 保留原始左侧（如果未包含名称则自动补充）；
-// 2. 将 URL 查询参数覆盖到配置部分后，将该部分中的所有空格移除。
-func modifyProxyEntry(line string, prefix string, params map[string]string) string {
-    idx := strings.Index(line, "=")
-    if idx == -1 {
-        return line
+// 添加强制更新函数
+func forceUpdate() error {
+    // 获取所有节点
+    nodes, err := fetchAllNodes()
+    if err != nil {
+        return fmt.Errorf("获取节点失败: %v", err)
     }
-    namePart := line[:idx]
-    configPart := line[idx+1:]
-    if prefix != "" && !strings.HasPrefix(namePart, prefix) {
-        namePart = prefix + " " + namePart
-    }
-    for param, newValue := range params {
-        pattern := fmt.Sprintf(`\b%s=([^,\s]+)`, param)
-        re := regexp.MustCompile("(?i)" + pattern)
-        if re.MatchString(configPart) {
-            configPart = re.ReplaceAllString(configPart, fmt.Sprintf("%s=%s", param, newValue))
-        } else {
-            configPart = configPart + fmt.Sprintf(",%s=%s", param, newValue)
-        }
-    }
-    configPart = strings.ReplaceAll(configPart, " ", "")
-    return namePart + "=" + configPart
+
+    // 处理节点
+    content := processNodes(nodes, url.Values{})
+
+    // 更新缓存
+    updateCache("default", content)
+    return nil
 }
 
-func processQueryParams(query map[string][]string) map[string]string {
-    result := make(map[string]string)
-    for short, full := range paramMap {
-        if values, ok := query[short]; ok && len(values) > 0 {
-            result[full] = values[0]
-        }
+// 处理请求
+func processRequest(r *http.Request) (string, error) {
+    // 读取缓存
+    content, err := getCachedContent("default")
+    if err != nil {
+        return "", err
     }
-    return result
+
+    // 应用参数
+    return applyParams(content, r.URL.Query())
 }
 
-// updateContent 从上游订阅获取完整代理配置，上游请求超时为 6 秒。
-// 处理完订阅条目后，对订阅结果先排序，再将自建节点内容插入到最前面，并返回完整内容。
-func updateContent(r *http.Request) (string, error) {
-    var subEntries []string
+// 获取所有节点
+func fetchAllNodes() ([]*Node, error) {
+    var allNodes []*Node
     var mu sync.Mutex
-    client := &http.Client{Timeout: 6 * time.Second}
     var wg sync.WaitGroup
 
     for _, sub := range subscriptions {
         wg.Add(1)
         go func(s Subscription) {
             defer wg.Done()
-            log.Printf("发送订阅请求，%s，请求头：%+v", s.airportName, r.Header)
-            req, err := http.NewRequest("GET", s.url, nil)
+            nodes, err := fetchSubscription(s)
             if err != nil {
-                log.Printf("创建请求失败 [%s]，错误：%v", s.airportName, err)
+                writeLog("ERROR", fmt.Sprintf("获取订阅失败 %s: %v", s.airportName, err), 0, nil, 0)
                 return
             }
-            if ua := r.Header.Get("user-agent"); ua != "" {
-                req.Header.Set("user-agent", ua)
-            }
-            if xsf := r.Header.Get("x-surge-unlocked-features"); xsf != "" {
-                req.Header.Set("x-surge-unlocked-features", xsf)
-            }
-            log.Printf("发送请求至 [%s]，请求头：%+v", s.airportName, req.Header)
-            resp, err := client.Do(req)
-            if err != nil {
-                log.Printf("请求失败 [%s]，错误：%v", s.airportName, err)
-                return
-            }
-            defer resp.Body.Close()
-            log.Printf("收到 [%s] 响应，响应头：%+v", s.airportName, resp.Header)
-            bodyBytes, err := ioutil.ReadAll(resp.Body)
-            if err != nil {
-                log.Printf("读取响应失败 [%s]，错误：%v", s.airportName, err)
-                return
-            }
-            bodyStr := string(bodyBytes)
-            log.Printf("[%s] 响应预览：%s", s.airportName, func() string {
-                if len(bodyStr) > 100 {
-                    return bodyStr[:100]
-                }
-                return bodyStr
-            }())
-            if !strings.Contains(strings.ToLower(bodyStr), "[proxy]") {
-                log.Printf("跳过 [%s]，格式非 Surge", s.airportName)
-                return
-            }
-            entries := extractProxyEntries(bodyStr)
             mu.Lock()
-            for _, entry := range entries {
-                if entry != "" && strings.Contains(entry, "=") {
-                    parts := strings.SplitN(entry, "=", 2)
-                    if !strings.HasPrefix(parts[0], s.airportName) {
-                        entry = s.airportName + " " + entry
-                    }
-                    subEntries = append(subEntries, entry)
-                }
-            }
+            allNodes = append(allNodes, nodes...)
             mu.Unlock()
         }(sub)
     }
     wg.Wait()
 
-    qParams := processQueryParams(r.URL.Query())
-    var processedSubs []string
-    dedupMap := make(map[string]string)
-    for _, entry := range subEntries {
-        modified := modifyProxyEntry(entry, "", qParams)
-        lower := strings.ToLower(modified)
-        if strings.Contains(lower, "direct") || strings.Contains(lower, "reject") {
-            continue
-        }
-        parts := strings.SplitN(modified, "=", 2)
-        if len(parts) != 2 {
-            continue
-        }
-        left := parts[0]
-        right := parts[1]
-        if existing, found := dedupMap[right]; found {
-            existingLeft := strings.SplitN(existing, "=", 2)[0]
-            if len(left) < len(existingLeft) {
-                dedupMap[right] = modified
-            }
-        } else {
-            dedupMap[right] = modified
-        }
-    }
-    for _, v := range dedupMap {
-        processedSubs = append(processedSubs, v)
-    }
-    // 排序订阅条目
-    sort.Strings(processedSubs)
-    // 将自建节点内容插入到最前面
-    finalEntries := append(selfNodeConfigs, processedSubs...)
-    finalConfig := "[Proxy]\n" + strings.Join(finalEntries, "\n")
-    return finalConfig, nil
+    return allNodes, nil
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
-    reqNum := atomic.AddInt64(&requestCount, 1)
-    log.Printf("收到客户端请求 #%d，方法：%s，URL：%s，主机：%s，请求头：%+v",
-        reqNum, r.Method, r.URL.String(), r.Host, r.Header)
-    if r.Method == http.MethodOptions {
-        w.Header().Set("Access-Control-Allow-Origin", "*")
-        w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, user-agent, x-surge-unlocked-features")
-        w.WriteHeader(http.StatusOK)
-        return
-    }
-    if r.Method != http.MethodGet {
-        log.Printf("鉴权失败（方法不允许） #%d，请求头：%+v", reqNum, r.Header)
-        http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
-        return
-    }
-    if r.URL.Path != "/"+token {
-        log.Printf("鉴权失败，路径错误 #%d，方法：%s，URL：%s，主机：%s，请求头：%+v",
-            reqNum, r.Method, r.URL.String(), r.Host, r.Header)
-        http.Error(w, "禁止访问：路径无效", http.StatusForbidden)
-        return
-    }
-
-    cacheMutex.Lock()
-    if item, exists := cachedResponse["global"]; exists && time.Since(item.timestamp) < cacheDuration {
-        cacheMutex.Unlock()
-        log.Printf("缓存命中，直接返回缓存内容 #%d", reqNum)
-        // 直接从内存中返回缓存的完整内容
-        w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-        w.Header().Set("Content-Disposition", "attachment; filename=sub")
-        w.Write([]byte(item.content))
-        return
-    }
-    cacheMutex.Unlock()
-
-    result, err, _ := sfGroup.Do("update", func() (interface{}, error) {
-        return updateContent(r)
-    })
+// 获取订阅内容
+func fetchSubscription(sub Subscription) ([]*Node, error) {
+    client := &http.Client{Timeout: 10 * time.Second}
+    req, err := http.NewRequest("GET", sub.url, nil)
     if err != nil {
-        http.Error(w, "更新内容失败", http.StatusInternalServerError)
-        return
+        return nil, err
     }
-    mergedConfig, ok := result.(string)
-    if !ok {
-        http.Error(w, "内部错误", http.StatusInternalServerError)
-        return
+    req.Header.Set("User-Agent", surgeUA)
+
+    resp, err := client.Do(req)
+    if err != nil {
+        return nil, err
     }
-    // 更新缓存并从内存返回
-    cacheMutex.Lock()
-    cachedResponse["global"] = cachedItem{timestamp: time.Now(), content: mergedConfig}
-    cacheMutex.Unlock()
-    w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-    w.Header().Set("Content-Disposition", "attachment; filename=sub")
-    log.Printf("返回新响应 #%d，返回完整文件", reqNum)
-    w.Write([]byte(mergedConfig))
+    defer resp.Body.Close()
+
+    body, err := ioutil.ReadAll(resp.Body)
+    if err != nil {
+        return nil, err
+    }
+
+    return parseSubscription(string(body), sub.airportName)
 }
 
-func main() {
-    initEnv()
-    http.HandleFunc("/", handler)
-    port := "3000"
-    addr := ":" + port
-    log.Printf("服务器已启动，版本：%s，监听地址：%s", version, addr)
-    log.Fatal(http.ListenAndServe(addr, nil))
+// 解析订阅内容
+func parseSubscription(content, airportName string) ([]*Node, error) {
+    var nodes []*Node
+    inProxySection := false
+
+    lines := strings.Split(content, "\n")
+    for _, line := range lines {
+        line = strings.TrimSpace(line)
+        if line == "" || strings.HasPrefix(line, "#") {
+            continue
+        }
+
+        if strings.ToLower(line) == "[proxy]" {
+            inProxySection = true
+            continue
+        }
+
+        if inProxySection && strings.HasPrefix(line, "[") {
+            break
+        }
+
+        if inProxySection && strings.Contains(line, "=") {
+            node := parseNode(line)
+            if node != nil {
+                node.fullName = fmt.Sprintf("%s %s", airportName, node.fullName)
+                nodes = append(nodes, node)
+            }
+        }
+    }
+
+    return nodes, nil
 }
+
+// 获取节点国家信息
+func getNodeCountry(node *Node) (string, string, error) {
+    // 创建代理客户端
+    proxyClient, err := createProxyClient(node)
+    if err != nil {
+        return "", "", fmt.Errorf("创建代理客户端失败: %v", err)
+    }
+
+    // 通过代理请求地理位置 API
+    country, err := getCountryViaProxy(proxyClient)
+    if err != nil {
+        return "", "", fmt.Errorf("获取地理位置失败: %v", err)
+    }
+
+    emoji := countryEmoji[country]
+    if emoji == "" {
+        emoji = "🌐" // 使用通用emoji作为默认值
+    }
+
+    return country, emoji, nil
+}
+
+// 创建代理客户端
+func createProxyClient(node *Node) (*http.Client, error) {
+    var proxyURL string
+    switch node.protocol {
+    case "ss":
+        proxyURL = createSSProxyURL(node)
+    case "trojan":
+        proxyURL = createTrojanProxyURL(node)
+    case "vmess":
+        proxyURL = createVmessProxyURL(node)
+    default:
+        return nil, fmt.Errorf("不支持的代理协议: %s", node.protocol)
+    }
+
+    proxy, err := url.Parse(proxyURL)
+    if err != nil {
+        return nil, err
+    }
+
+    return &http.Client{
+        Timeout: 10 * time.Second,
+        Transport: &http.Transport{
+            Proxy: http.ProxyURL(proxy),
+        },
+    }, nil
+}
+
+// 创建 SS 代理 URL
+func createSSProxyURL(node *Node) string {
+    // 构建 SS 代理 URL
+    // 格式: ss://method:password@host:port
+    method := node.params["method"]
+    password := node.params["password"]
+    return fmt.Sprintf("ss://%s:%s@%s:%s", method, password, node.server, node.port)
+}
+
+// 创建 Trojan 代理 URL
+func createTrojanProxyURL(node *Node) string {
+    // 构建 Trojan 代理 URL
+    // 格式: trojan://password@host:port?security=tls&sni=xxx
+    password := node.params["password"]
+    sni := node.params["sni"]
+    return fmt.Sprintf("trojan://%s@%s:%s?security=tls&sni=%s", password, node.server, node.port, sni)
+}
+
+// 创建 Vmess 代理 URL
+func createVmessProxyURL(node *Node) string {
+    // 构建 Vmess 代理 URL
+    // 格式: vmess://base64(json)
+    vmessConfig := map[string]interface{}{
+        "v":    "2",
+        "ps":   node.fullName,
+        "add":  node.server,
+        "port": node.port,
+        "id":   node.params["uuid"],
+        "aid":  node.params["alterId"],
+        "net":  node.params["network"],
+        "type": "none",
+        "host": node.params["host"],
+        "path": node.params["path"],
+        "tls":  node.params["tls"],
+    }
+
+    jsonData, err := json.Marshal(vmessConfig)
+    if err != nil {
+        return ""
+    }
+
+    return fmt.Sprintf("vmess://%s", base64.StdEncoding.EncodeToString(jsonData))
+}
+
+// 通过代理获取国家信息
+func getCountryViaProxy(client *http.Client) (string, error) {
+    resp, err := client.Get(geoAPIURL)
+    if err != nil {
+        return "", err
+    }
+    defer resp.Body.Close()
+
+    body, err := ioutil.ReadAll(resp.Body)
+    if err != nil {
+        return "", err
+    }
+
+    var result struct {
+        CountryCode string `json:"countryCode"`
+    }
+
+    if err := json.Unmarshal(body, &result); err != nil {
+        return "", err
+    }
+
+    return result.CountryCode, nil
+}
+
+// 处理节点域名
+func processNodeDomain(node *Node) ([]*Node, error) {
+    if node == nil {
+        return nil, fmt.Errorf("节点不能为空")
+    }
+
+    if !node.isDomain {
+        return []*Node{node}, nil
+    }
+
+    // 获取域名的所有 IP
+    ips, err := getIPsForDomain(node.server)
+    if err != nil {
+        return nil, fmt.Errorf("处理域名 %s 失败: %v", node.server, err)
+    }
+
+    if len(ips) == 0 {
+        return nil, fmt.Errorf("域名 %s 没有可用的 IP", node.server)
+    }
+
+    if len(ips) == 1 {
+        // 只有一个 IP，直接修改节点
+        node.server = ips[0]
+        node.isDomain = false
+        return []*Node{node}, nil
+    }
+
+    // 多个 IP，分裂节点
+    var nodes []*Node
+    for _, ip := range ips {
+        newNode := *node
+        newNode.server = ip
+        newNode.isDomain = false
+        nodes = append(nodes, &newNode)
+    }
+
+    return nodes, nil
+}
+
+// 处理节点 SNI
+func processNodeSNI(node *Node) error {
+    if node == nil {
+        return fmt.Errorf("节点不能为空")
+    }
+
+    // 检查是否需要 SNI
+    needsSNI := node.protocol == "trojan" || 
+                (node.protocol == "vmess" && node.params["tls"] == "tls") ||
+                (node.protocol == "ss" && node.params["plugin"] == "v2ray-plugin")
+
+    if !needsSNI {
+        return nil
+    }
+
+    // 如果已经有 SNI，保持不变
+    if _, hasSNI := node.params["sni"]; hasSNI {
+        return nil
+    }
+
+    // 如果是域名，使用域名作为 SNI
+    if node.isDomain {
+        node.params["sni"] = node.server
+        return nil
+    }
+
+    return fmt.Errorf("无法为节点设置 SNI: 不是域名且没有现有 SNI")
+}
+
+// 获取域名的所有 IP
+func getIPsForDomain(domain string) ([]string, error) {
+    if domain == "" {
+        return nil, fmt.Errorf("域名不能为空")
+    }
+
+    var ips []string
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+    errChan := make(chan error, len(dnsServers))
+    successChan := make(chan struct{})
+
+    for _, dnsServer := range dnsServers {
+        wg.Add(1)
+        go func(server string) {
+            defer wg.Done()
+            if ip, err := queryDNS(domain, server); err == nil && ip != "" {
+                mu.Lock()
+                // 检查 IP 是否已存在
+                exists := false
+                for _, existingIP := range ips {
+                    if existingIP == ip {
+                        exists = true
+                        break
+                    }
+                }
+                if !exists {
+                    ips = append(ips, ip)
+                }
+                mu.Unlock()
+                successChan <- struct{}{}
+            } else if err != nil {
+                errChan <- err
+            }
+        }(dnsServer)
+    }
+
+    // 等待至少一个成功或所有失败
+    go func() {
+        wg.Wait()
+        close(errChan)
+        close(successChan)
+    }()
+
+    // 检查是否有成功
+    successCount := 0
+    for range successChan {
+        successCount++
+    }
+
+    // 如果没有成功，返回错误
+    if successCount == 0 {
+        var errs []string
+        for err := range errChan {
+            errs = append(errs, err.Error())
+        }
+        return nil, fmt.Errorf("所有 DNS 查询失败: %s", strings.Join(errs, "; "))
+    }
+
+    return ips, nil
+}
+
+// 查询 DNS
+func queryDNS(domain, dnsServer string) (string, error) {
+    m := new(dns.Msg)
+    m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+    m.RecursionDesired = true
+
+    r, _, err := dnsClient.Exchange(m, dnsServer+":53")
+    if err != nil {
+        return "", err
+    }
+
+    if len(r.Answer) == 0 {
+        return "", nil
+    }
+
+    if a, ok := r.Answer[0].(*dns.A); ok {
+        return a.A.String(), nil
+    }
+
+    return "", nil
+}
+
+// 修改 processNodes 函数
+func processNodes(nodes []*Node, query url.Values) string {
+    if len(nodes) == 0 {
+        return ""
+    }
+
+    var allNodes []*Node
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    errChan := make(chan error, len(nodes))
+
+    // 并行处理所有节点
+    for _, node := range nodes {
+        wg.Add(1)
+        go func(n *Node) {
+            defer wg.Done()
+
+            // 获取节点国家信息
+            country, emoji, err := getNodeCountry(n)
+            if err != nil {
+                errChan <- fmt.Errorf("节点 %s 获取国家信息失败: %v", n.server, err)
+                return
+            }
+
+            n.country = country
+            n.emoji = emoji
+
+            // 处理节点域名
+            processedNodes, err := processNodeDomain(n)
+            if err != nil {
+                errChan <- fmt.Errorf("节点 %s 处理域名失败: %v", n.server, err)
+                return
+            }
+
+            // 处理每个节点的 SNI
+            for _, node := range processedNodes {
+                if err := processNodeSNI(node); err != nil {
+                    errChan <- fmt.Errorf("节点 %s 处理 SNI 失败: %v", node.server, err)
+                    return
+                }
+            }
+
+            mu.Lock()
+            allNodes = append(allNodes, processedNodes...)
+            mu.Unlock()
+        }(node)
+    }
+
+    wg.Wait()
+    close(errChan)
+
+    // 检查是否有错误
+    for err := range errChan {
+        writeLog("ERROR", err.Error(), 0, nil, 0)
+    }
+
+    // 如果没有有效节点，返回空字符串
+    if len(allNodes) == 0 {
+        return ""
+    }
+
+    // 去重并重命名节点
+    return deduplicateAndRenameNodes(allNodes, query)
+}
+
+// 去重并重命名节点
+func deduplicateAndRenameNodes(nodes []*Node, query url.Values) string {
+    if len(nodes) == 0 {
+        return ""
+    }
+
+    // 创建节点映射
+    nodeMap := make(map[string]*Node)
+    for _, node := range nodes {
+        if node == nil {
+            continue
+        }
+
+        // 创建唯一键
+        key := fmt.Sprintf("%s:%s:%s:%s", node.protocol, node.server, node.port, node.country)
+        
+        // 如果节点已存在，跳过
+        if _, exists := nodeMap[key]; exists {
+            continue
+        }
+        
+        // 应用参数
+        applyNodeParams(node, query)
+        nodeMap[key] = node
+    }
+
+    // 如果没有有效节点，返回空字符串
+    if len(nodeMap) == 0 {
+        return ""
+    }
+
+    // 按国家分组计数
+    countryCount := make(map[string]int)
+    for _, node := range nodeMap {
+        countryCount[node.country]++
+    }
+
+    // 重命名节点
+    var result []string
+    currentCount := make(map[string]int)
+    for _, node := range nodeMap {
+        count := currentCount[node.country]
+        currentCount[node.country]++
+        node.fullName = fmt.Sprintf("%s %s-%s-%d", node.fullName, node.emoji, node.country, count+1)
+        result = append(result, buildNodeString(node))
+    }
+
+    return strings.Join(result, "\n")
+}
+
+// 应用节点参数
+func applyNodeParams(node *Node, query url.Values) {
+    // 应用参数
+    for param, value := range query {
+        if fullParam, ok := paramMap[param]; ok {
+            node.params[fullParam] = value[0]
+        }
+    }
+
+    // 处理布尔值参数
+    for k, v := range node.params {
+        if v == "true" {
+            node.params[k] = "1"
+        } else if v == "false" {
+            node.params[k] = "0"
+        }
+    }
+}
+
+// 启动缓存检查
+func startCacheCheck() {
+    ticker := time.NewTicker(2 * time.Hour)
+    for range ticker.C {
+        if err := checkCache(); err != nil {
+            writeLog("ERROR", fmt.Sprintf("缓存检查失败: %v", err), 0, nil, 0)
+        }
+    }
+}
+
+// 检查缓存
+func checkCache() error {
+    cacheMutex.Lock()
+    defer cacheMutex.Unlock()
+
+    if item, ok := cachedResponse["default"]; ok {
+        if time.Since(item.timestamp) > cacheDuration {
+            // 执行更新
+            nodes, err := fetchAllNodes()
+            if err != nil {
+                return err
+            }
+
+            content := processNodes(nodes, url.Values{})
+            updateCache("default", content)
+        }
+    }
+    return nil
+}
+
+// 应用参数
+func applyParams(content string, query url.Values) (string, error) {
+    var result []string
+    lines := strings.Split(content, "\n")
+
+    for _, line := range lines {
+        node := parseNode(line)
+        if node == nil {
+            continue
+        }
+
+        // 应用参数
+        for param, value := range query {
+            if fullParam, ok := paramMap[param]; ok {
+                node.params[fullParam] = value[0]
+            }
+        }
+
+        // 处理布尔值参数
+        for k, v := range node.params {
+            if v == "true" {
+                node.params[k] = "1"
+            } else if v == "false" {
+                node.params[k] = "0"
+            }
+        }
+
+        result = append(result, buildNodeString(node))
+    }
+
+    return strings.Join(result, "\n"), nil
+}
+
+// 其他辅助函数
+func generateToken() (string, error) {
+    b := make([]byte, 32)
+    if _, err := rand.Read(b); err != nil {
+        return "", err
+    }
+    return base64.URLEncoding.EncodeToString(b), nil
+}
+
+func writeLog(level, message string, requestID int64, r *http.Request, status int) {
+    entry := LogEntry{
+        Timestamp: time.Now().Format("2006-01-02 15:04:05"),
+        Level:     level,
+        Message:   message,
+        RequestID: requestID,
+    }
+
+    if r != nil {
+        entry.URL = r.URL.String()
+        entry.Method = r.Method
+        entry.Status = status
+    }
+
+    logMutex.Lock()
+    defer logMutex.Unlock()
+
+    if logFile != nil {
+        log.Printf("%s [%s] %s", entry.Timestamp, entry.Level, entry.Message)
+    }
+}
+
+// 缓存相关函数
+func getCachedContent(key string) (string, bool) {
+    cacheMutex.Lock()
+    defer cacheMutex.Unlock()
+
+    if item, ok := cachedResponse[key]; ok {
+        if time.Since(item.timestamp) < cacheDuration {
+            return item.content, true
+        }
+    }
+    return "", false
+}
+
+func updateCache(key string, content string) {
+    cacheMutex.Lock()
+    cachedResponse[key] = cachedItem{
+        timestamp: time.Now(),
+        content:   content,
+    }
+    cacheMutex.Unlock()
+
+    go saveCache()
+}
+
+func saveCache() error {
+    cacheFile := filepath.Join(dataDir, "cache.json")
+    cacheMutex.Lock()
+    defer cacheMutex.Unlock()
+
+    data := make(map[string]cachedItem)
+    for k, v := range cachedResponse {
+        data[k] = v
+    }
+
+    jsonData, err := json.MarshalIndent(data, "", "  ")
+    if err != nil {
+        return err
+    }
+
+    return ioutil.WriteFile(cacheFile, jsonData, 0644)
+}
+
+func loadCache() error {
+    cacheFile := filepath.Join(dataDir, "cache.json")
+    if _, err := os.Stat(cacheFile); os.IsNotExist(err) {
+        return nil
+    }
+
+    data, err := ioutil.ReadFile(cacheFile)
+    if err != nil {
+        return err
+    }
+
+    var cacheData map[string]cachedItem
+    if err := json.Unmarshal(data, &cacheData); err != nil {
+        return err
+    }
+
+    cacheMutex.Lock()
+    cachedResponse = cacheData
+    cacheMutex.Unlock()
+
+    return nil
+}
+
+// Token 相关函数
+func saveToken() error {
+    return ioutil.WriteFile(filepath.Join(dataDir, "token.txt"), []byte(token), 0600)
+}
+
+func loadToken() (string, error) {
+    tokenFile := filepath.Join(dataDir, "token.txt")
+    if _, err := os.Stat(tokenFile); os.IsNotExist(err) {
+        return "", nil
+    }
+
+    data, err := ioutil.ReadFile(tokenFile)
+    if err != nil {
+        return "", err
+    }
+
+    return strings.TrimSpace(string(data)), nil
+}
+
+// 其他辅助函数
+func generateCacheKey(params map[string]string) string {
+    var keys []string
+    for k := range params {
+        keys = append(keys, k)
+    }
+    sort.Strings(keys)
+
+    var parts []string
+    for _, k := range keys {
+        parts = append(parts, fmt.Sprintf("%s=%s", k, params[k]))
+    }
+    return strings.Join(parts, "&")
+}
+
+func processQueryParams(query map[string][]string) map[string]string {
+    params := make(map[string]string)
+    for k, v := range query {
+        if len(v) > 0 {
+            params[k] = v[0]
+        }
+    }
+    return params
+}
+
+func parseNode(line string) *Node {
+    // 解析节点配置
+    // 这里需要根据实际的节点格式进行解析
+    // 示例实现
+    parts := strings.Split(line, ",")
+    if len(parts) < 3 {
+        return nil
+    }
+
+    node := &Node{
+        protocol: parts[0],
+        server:   parts[1],
+        port:     parts[2],
+        params:   make(map[string]string),
+    }
+
+    if len(parts) > 3 {
+        for i := 3; i < len(parts); i++ {
+            if strings.Contains(parts[i], "=") {
+                kv := strings.SplitN(parts[i], "=", 2)
+                node.params[kv[0]] = kv[1]
+            }
+        }
+    }
+
+    return node
+}
+
+func buildNodeString(node *Node) string {
+    var parts []string
+    parts = append(parts, node.protocol, node.server, node.port)
+
+    for k, v := range node.params {
+        parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+    }
+
+    return strings.Join(parts, ",")
+}
+
