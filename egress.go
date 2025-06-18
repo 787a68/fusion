@@ -423,11 +423,15 @@ func updateMihomoProxy(node string) error {
 		Timeout: proxyUpdateTimeout,
 	}
 	
-	resp, err := client.Put(
-		fmt.Sprintf("http://127.0.0.1:%d/configs", mihomoPort+2),
-		"application/json",
-		strings.NewReader(proxyConfig),
-	)
+	// 创建 PUT 请求
+	req, err := http.NewRequest("PUT", fmt.Sprintf("http://127.0.0.1:%d/configs", mihomoPort+2), strings.NewReader(proxyConfig))
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	
+	// 发送请求
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("更新代理配置失败: %v", err)
 	}
@@ -460,8 +464,13 @@ func getLocationFromIP(ip string) (string, error) {
 		return info.(string), nil
 	}
 
+	// 创建带超时的 HTTP 客户端
+	client := &http.Client{
+		Timeout: locationTimeout,
+	}
+
 	// 使用 ip-api.com 获取地理位置信息
-	resp, err := http.Get(fmt.Sprintf("http://ip-api.com/json/%s", ip))
+	resp, err := client.Get(fmt.Sprintf("http://ip-api.com/json/%s", ip))
 	if err != nil {
 		return "", fmt.Errorf("请求 ip-api.com 失败: %v", err)
 	}
