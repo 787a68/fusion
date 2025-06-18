@@ -1,25 +1,40 @@
-FROM golang:latest AS builder
+FROM golang:alpine AS builder
 
+# 安装基本工具
+RUN apk add --no-cache git gcc musl-dev
+
+# 设置工作目录
 WORKDIR /app
 
+# 复制源代码
 COPY . .
 
-# 初始化并更新依赖
-RUN go mod init fusion && \
-    go mod tidy && \
-    go mod download
+# 接收版本参数
+ARG VERSION=dev
 
-# 显示详细的构建错误
-RUN CGO_ENABLED=0 GOOS=linux go build -v -x -o fusion
+# 编译（添加编译选项和版本信息）
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.Version=${VERSION}" -o fusion .
 
+# 最终镜像
 FROM alpine:latest
 
-WORKDIR /app
+# 安装必要的系统工具
+RUN apk add --no-cache ca-certificates tzdata bind-tools traceroute curl iputils
 
-COPY --from=builder /app/fusion .
+# 创建工作目录和日志目录
+RUN mkdir -p /fusion/logs
 
-# 创建数据目录
-RUN mkdir -p /app/data
+# 从builder复制编译好的程序
+COPY --from=builder /app/fusion /usr/local/bin/
 
-# 启动命令
-CMD ["./fusion"]
+# 设置环境变量
+ENV TZ=Asia/Shanghai
+
+# 暴露端口
+EXPOSE 8080
+
+# 设置持久化卷
+VOLUME ["/fusion"]
+
+# 运行程序
+CMD ["fusion"]
