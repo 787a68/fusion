@@ -94,9 +94,15 @@ func updateNodes() error {
 		return fmt.Errorf("没有成功处理任何节点")
 	}
 
+	// 检查节点内容是否为空
+	content := strings.Join(allNodes, "\n")
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("生成的节点配置为空")
+	}
+
 	// 写入配置文件
 	nodePath := filepath.Join(fusionDir, "node.conf")
-	return os.WriteFile(nodePath, []byte(strings.Join(allNodes, "\n")), 0644)
+	return os.WriteFile(nodePath, []byte(content), 0644)
 }
 
 func fetchSubscription(url string) ([]string, error) {

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -30,8 +31,12 @@ func init() {
 	}
 
 	// 检查并设置TOKEN
+	tokenPath := filepath.Join(fusionDir, "token")
 	if token := os.Getenv("TOKEN"); token != "" {
 		TOKEN = token
+	} else if tokenBytes, err := os.ReadFile(tokenPath); err == nil {
+		// 从文件读取token
+		TOKEN = string(tokenBytes)
 	} else {
 		// 生成随机TOKEN
 		b := make([]byte, 16)
@@ -40,7 +45,7 @@ func init() {
 		}
 		TOKEN = hex.EncodeToString(b)
 		// 写入持久存储
-		if err := os.WriteFile(filepath.Join(fusionDir, "token"), []byte(TOKEN), 0644); err != nil {
+		if err := os.WriteFile(tokenPath, []byte(TOKEN), 0644); err != nil {
 			log.Fatalf("保存TOKEN失败: %v", err)
 		}
 	}
@@ -56,41 +61,18 @@ func init() {
 }
 
 func setupLogger() {
-	// 当前日期作为日志文件名
-	currentLogFile := filepath.Join(logDir, time.Now().Format("2006-01-02")+".log")
-	
-	// 如果已经打开了日志文件，且不是今天的，则关闭它
-	if logFile != nil {
-		logFile.Close()
-		logFile = nil
-	}
-	
-	f, err := os.OpenFile(currentLogFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	// 创建日志文件
+	startTime := time.Now().Format("200601021504")
+	logFile := filepath.Join(logDir, fmt.Sprintf("fusion_%s.log", startTime))
+	f, err := os.OpenFile(logFile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		log.Fatalf("打开日志文件失败: %v", err)
 	}
-	logFile = f
 
-	// 创建多输出写入器
-	multiWriter := io.MultiWriter(os.Stdout, f)
-	
-	// 设置日志格式
-	log.SetOutput(multiWriter)
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-
-	// 启动日志清理协程
-	go cleanOldLogs()
-	
-	// 每天午夜重新设置日志文件
-	go func() {
-		for {
-			now := time.Now()
-			next := now.Add(24 * time.Hour)
-			next = time.Date(next.Year(), next.Month(), next.Day(), 0, 0, 0, 0, next.Location())
-			time.Sleep(next.Sub(now))
-			setupLogger()
-		}
-	}()
+	// 设置日志输出
+	log.SetOutput(f)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	log.Printf("Fusion v%s 启动，TOKEN: %s", Version, TOKEN)
 }
 
 func cleanOldLogs() {
@@ -156,12 +138,7 @@ func checkNodeConfig() {
 		nodePath := filepath.Join(fusionDir, "node.conf")
 		info, err := os.Stat(nodePath)
 		
-		if os.IsNotExist(err) {
-			log.Println("node.conf 不存在，执行更新")
-			if err := updateNodes(); err != nil {
-				log.Printf("更新节点失败: %v", err)
-			}
-		} else if err == nil {
+		if err == nil {
 			// 检查文件是否超过24小时
 			if time.Since(info.ModTime()) > 24*time.Hour {
 				log.Println("node.conf 超过24小时，执行更新")
@@ -169,6 +146,9 @@ func checkNodeConfig() {
 					log.Printf("更新节点失败: %v", err)
 				}
 			}
+		} else if !os.IsNotExist(err) {
+			// 只有在文件存在但无法访问时才记录错误
+			log.Printf("检查 node.conf 失败: %v", err)
 		}
 
 		time.Sleep(2 * time.Hour)
