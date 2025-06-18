@@ -333,8 +333,8 @@ func parseParams(config string) map[string]string {
 	}
 
 	// 处理其他参数
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
+	for i := 3; i < len(parts); i++ {
+		part := strings.TrimSpace(parts[i])
 		keyVal := strings.SplitN(part, "=", 2)
 		if len(keyVal) == 2 {
 			key := strings.TrimSpace(keyVal[0])
