@@ -509,7 +509,7 @@ func getLocationFromIP(ip string) (string, error) {
 	locationCacheMutex.Lock()
 	if info, ok := locationCache[ip]; ok {
 		locationCacheMutex.Unlock()
-		return info.Location, nil
+		return info.ISOCode + " " + info.City, nil
 	}
 	locationCacheMutex.Unlock()
 
@@ -540,19 +540,18 @@ func getLocationFromIP(ip string) (string, error) {
 		return "", fmt.Errorf("获取位置信息失败: %s", result.Status)
 	}
 
-	// 构建位置字符串
-	location := fmt.Sprintf("%s %s", result.CountryCode, result.City)
-
 	// 缓存结果
 	locationCacheMutex.Lock()
 	locationCache[ip] = struct {
-		Location string
-		Time     time.Time
+		ISOCode string
+		City    string
+		Time    time.Time
 	}{
-		Location: location,
-		Time:     time.Now(),
+		ISOCode: result.CountryCode,
+		City:    result.City,
+		Time:    time.Now(),
 	}
 	locationCacheMutex.Unlock()
 
-	return location, nil
+	return result.CountryCode + " " + result.City, nil
 }
