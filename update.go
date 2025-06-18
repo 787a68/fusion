@@ -123,7 +123,8 @@ func fetchSubscription(url string) ([]string, error) {
 			return nil, fmt.Errorf("未找到[Proxy]部分")
 		}
 
-	// 查找下一个Section		endIdx := len(content)
+		// 查找下一个Section
+		endIdx := 0
 		for _, section := range []string{"[Rule]", "[RULE]", "[Proxy Group]", "[PROXY-GROUP]"} {
 			if idx := strings.Index(content[startIdx:], section); idx != -1 {
 				if startIdx+idx < endIdx {

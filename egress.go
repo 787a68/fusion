@@ -3,15 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
-	"net/url"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"./utils"
 )
 
 type NodeInfo struct {
@@ -147,7 +145,7 @@ func getLocationInfo(node string) (string, string, error) {
 		return "", "", fmt.Errorf("无效的节点格式")
 	}
 
-	params := parseParams(parts[1])
+	params := utils.ParseParams(parts[1])
 	ip := params["server"]
 	if ip == "" {
 		return "", "", fmt.Errorf("未找到服务器地址")
@@ -203,7 +201,7 @@ func getTraceCount(node string) (int, error) {
 		return 0, fmt.Errorf("无效的节点格式")
 	}
 
-	params := parseParams(parts[1])
+	params := utils.ParseParams(parts[1])
 	ip := params["server"]
 	if ip == "" {
 		return 0, fmt.Errorf("未找到服务器地址")
@@ -241,7 +239,7 @@ func getNATType(node string) (string, error) {
 		return "", fmt.Errorf("无效的节点格式")
 	}
 
-	params := parseParams(parts[1])
+	params := utils.ParseParams(parts[1])
 	serverAddr := params["server"]
 	if serverAddr == "" {
 		return "", fmt.Errorf("未找到服务器地址")
@@ -307,19 +305,4 @@ func getCountryFlag(code string) string {
 
 	code = strings.ToUpper(code)
 	return string(0x1F1E6+rune(code[0]-'A')) + string(0x1F1E6+rune(code[1]-'A'))
-}
-
-func parseParams(config string) map[string]string {
-	params := make(map[string]string)
-	parts := strings.Split(config, ",")
-
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		keyVal := strings.SplitN(part, "=", 2)
-		if len(keyVal) == 2 {
-			params[strings.TrimSpace(keyVal[0])] = strings.TrimSpace(keyVal[1])
-		}
-	}
-
-	return params
 }

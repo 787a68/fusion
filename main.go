@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"sync"
 	"time"
 )
