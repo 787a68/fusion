@@ -101,10 +101,9 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 
 	var info NodeInfo
 	var wg sync.WaitGroup
-	var errChan = make(chan error, 3)
+	var errChan = make(chan error, 2)  // 只需要2个错误通道，因为geo是同步的
 	var doneChan = make(chan struct{})
 	var once sync.Once
-	var geoDone = make(chan struct{})
 
 	// 设置总超时控制
 	go func() {
@@ -114,38 +113,30 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 		})
 	}()
 
-	// 并行执行检测任务
-	wg.Add(3)
+	// 1. 先执行地理位置检测
+	iso, flag, err := getLocationInfo(node)
+	if err != nil {
+		return nil, fmt.Errorf("地理位置测试失败: %v", err)
+	}
+	info.ISOCode = iso
+	info.Flag = flag
 
-	// 1. 获取ISO代码和旗帜
+	// 如果不是香港节点，直接返回结果
+	if info.ISOCode != "HK" {
+		// 更新节点计数
+		counterMutex.Lock()
+		nodeCounter[info.ISOCode]++
+		info.Count = nodeCounter[info.ISOCode]
+		counterMutex.Unlock()
+		return &info, nil
+	}
+
+	// 2. 对于香港节点，执行 trace 和 NAT 检测
+	wg.Add(2)
+
+	// 获取trace节点数
 	go func() {
 		defer wg.Done()
-		iso, flag, err := getLocationInfo(node)
-		if err != nil {
-			select {
-			case errChan <- fmt.Errorf("地理位置测试失败: %v", err):
-			case <-doneChan:
-			}
-			return
-		}
-		info.ISOCode = iso
-		info.Flag = flag
-		close(geoDone)  // 标记地理位置测试完成
-	}()
-
-	// 2. 获取trace节点数
-	go func() {
-		defer wg.Done()
-		// 等待地理位置测试完成或失败
-		select {
-		case <-geoDone:
-			// 地理位置测试成功，检查是否为香港
-			if info.ISOCode != "HK" {
-				return // 不是香港，跳过 trace 检测
-			}
-		case <-doneChan:
-			return
-		}
 		count, err := getTraceCount(node)
 		if err != nil {
 			select {
@@ -157,19 +148,9 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 		info.TraceCount = count
 	}()
 
-	// 3. 获取NAT类型
+	// 获取NAT类型
 	go func() {
 		defer wg.Done()
-		// 等待地理位置测试完成或失败
-		select {
-		case <-geoDone:
-			// 地理位置测试成功，检查是否为香港
-			if info.ISOCode != "HK" {
-				return // 不是香港，跳过 NAT 检测
-			}
-		case <-doneChan:
-			return
-		}
 		natType, err := getNATType(node)
 		if err != nil {
 			select {
@@ -341,6 +322,16 @@ func parseParams(config string) map[string]string {
 	return params
 }
 
+// 检查端口是否开放
+func isPortOpen(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // 启动 mihomo 代理服务器
 func startMihomo() error {
 	mihomoMutex.Lock()
@@ -494,10 +485,4 @@ func getLocationFromIP(ip string) (string, error) {
 	locationCache.Store(ip, location)
 	
 	return location, nil
-}
-
-// 获取国家代码
-func getCountryCode(country string) string {
-	// 直接返回传入的国家代码，因为 ip-api.com 已经返回了标准的 ISO 代码
-	return country
 }
