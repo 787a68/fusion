@@ -225,7 +225,7 @@ func processNode(source, node string) (string, error) {
 		info.Count)
 
 	// 转换布尔值
-	config := parts[1]
+	config := strings.TrimSpace(parts[1])
 	config = strings.ReplaceAll(config, "true", "1")
 	config = strings.ReplaceAll(config, "false", "0")
 

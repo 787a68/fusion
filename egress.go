@@ -154,12 +154,15 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 }
 
 func getLocationInfo(node string) (string, string, error) {
+	// 移除节点名称部分
 	parts := strings.SplitN(node, "=", 2)
 	if len(parts) != 2 {
 		return "", "", fmt.Errorf("无效的节点格式")
 	}
 
-	params := parseParams(parts[1])
+	// 获取配置部分并去除空格
+	config := strings.TrimSpace(parts[1])
+	params := parseParams(config)
 	ip := params["server"]
 	if ip == "" {
 		return "", "", fmt.Errorf("未找到服务器地址")
@@ -203,10 +206,14 @@ func getLocationInfo(node string) (string, string, error) {
 		ISOCode string
 		Flag    string
 		Time    time.Time
-	}{ISOCode: strings.ToUpper(result.CountryCode), Flag: flag, Time: time.Now()}
+	}{
+		ISOCode: result.CountryCode,
+		Flag:    flag,
+		Time:    time.Now(),
+	}
 	locationMutex.Unlock()
 
-	return strings.ToUpper(result.CountryCode), flag, nil
+	return result.CountryCode, flag, nil
 }
 
 func getTraceCount(node string) (int, error) {
@@ -215,7 +222,9 @@ func getTraceCount(node string) (int, error) {
 		return 0, fmt.Errorf("无效的节点格式")
 	}
 
-	params := parseParams(parts[1])
+	// 获取配置部分并去除空格
+	config := strings.TrimSpace(parts[1])
+	params := parseParams(config)
 	ip := params["server"]
 	if ip == "" {
 		return 0, fmt.Errorf("未找到服务器地址")
@@ -253,7 +262,9 @@ func getNATType(node string) (string, error) {
 		return "", fmt.Errorf("无效的节点格式")
 	}
 
-	params := parseParams(parts[1])
+	// 获取配置部分并去除空格
+	config := strings.TrimSpace(parts[1])
+	params := parseParams(config)
 	serverAddr := params["server"]
 	if serverAddr == "" {
 		return "", fmt.Errorf("未找到服务器地址")

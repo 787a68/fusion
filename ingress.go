@@ -9,7 +9,7 @@ import (
 )
 
 func processIngressNode(node string) (string, error) {
-	// 移除可能的 BOM 标记
+	// 移除可能的 BOM 标记和空格
 	node = strings.TrimSpace(node)
 	
 	// 处理节点格式
@@ -18,7 +18,7 @@ func processIngressNode(node string) (string, error) {
 		return "", fmt.Errorf("无效的节点格式: %s", node)
 	}
 
-	name, config := parts[0], parts[1]
+	name, config := parts[0], strings.TrimSpace(parts[1])
 	
 	// 清理名称中的特殊字符
 	name = strings.TrimSpace(name)
