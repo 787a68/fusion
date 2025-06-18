@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -19,16 +21,29 @@ jobs:
           go-version: 'stable'
           cache: false
       
-      - name: Generate go.sum
+      - name: Initialize Go module
         run: |
           if [ ! -f go.mod ]; then
             go mod init fusion
           fi
+          
+          go mod download
           go mod tidy
-          if [ ! -f go.sum ]; then
+          sleep 2
+          
+          if [ -f go.sum ]; then
+            echo "Dependencies initialized successfully"
+          else
+            echo "Retrying dependency initialization..."
             go mod tidy
+            sleep 2
+            if [ ! -f go.sum ]; then
+              echo "Failed to initialize dependencies"
+              exit 1
+            fi
           fi
-          cat go.sum
+          
+          go mod verify
 
       - name: Set up Go with cache
         uses: actions/setup-go@v4
@@ -40,8 +55,7 @@ jobs:
             **/go.mod
 
       - name: Build Go code
-        run: |
-          go build -v ./...
+        run: go build -v ./...
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
