@@ -42,6 +42,8 @@ jobs:
       - name: Build
         run: |
           VERSION=$(date +'%Y%m%d%H%M')
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building version: $VERSION"
           go build -v -ldflags="-X 'main.Version=$VERSION'" -o fusion ./...
 
       - name: Test
@@ -61,6 +63,8 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/fusion:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/fusion:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/fusion:${{ env.VERSION }}
           build-args: |
             VERSION=${{ env.VERSION }}

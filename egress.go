@@ -73,11 +73,14 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 	var wg sync.WaitGroup
 	var errChan = make(chan error, 3)
 	var doneChan = make(chan struct{})
+	var once sync.Once
 
 	// 设置超时控制
 	go func() {
 		time.Sleep(10 * time.Second)
-		close(doneChan)
+		once.Do(func() {
+			close(doneChan)
+		})
 	}()
 
 	// 并行执行检测任务
@@ -88,7 +91,10 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 		defer wg.Done()
 		iso, flag, err := getLocationInfo(node)
 		if err != nil {
-			errChan <- fmt.Errorf("获取位置信息失败: %v", err)
+			select {
+			case errChan <- fmt.Errorf("获取位置信息失败: %v", err):
+			case <-doneChan:
+			}
 			return
 		}
 		info.ISOCode = iso
@@ -100,7 +106,10 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 		defer wg.Done()
 		count, err := getTraceCount(node)
 		if err != nil {
-			errChan <- fmt.Errorf("获取trace信息失败: %v", err)
+			select {
+			case errChan <- fmt.Errorf("获取trace信息失败: %v", err):
+			case <-doneChan:
+			}
 			return
 		}
 		info.TraceCount = count
@@ -111,7 +120,10 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 		defer wg.Done()
 		natType, err := getNATType(node)
 		if err != nil {
-			errChan <- fmt.Errorf("获取NAT类型失败: %v", err)
+			select {
+			case errChan <- fmt.Errorf("获取NAT类型失败: %v", err):
+			case <-doneChan:
+			}
 			return
 		}
 		info.NATType = natType
@@ -120,7 +132,9 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 	// 等待所有任务完成或超时
 	go func() {
 		wg.Wait()
-		close(doneChan)
+		once.Do(func() {
+			close(doneChan)
+		})
 	}()
 
 	// 设置超时

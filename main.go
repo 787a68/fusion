@@ -141,37 +141,48 @@ func cleanOldLogs() {
 	}
 }
 
-func checkNodeConfig() {
+func checkNodeConfig(stopChan <-chan struct{}) {
 	for {
-		nodePath := filepath.Join(fusionDir, "node.conf")
-		info, err := os.Stat(nodePath)
-		
-		if err != nil {
-			if os.IsNotExist(err) {
-				log.Println("node.conf 不存在，执行更新")
-				if err := updateNodes(); err != nil {
-					log.Printf("更新节点失败: %v", err)
+		select {
+		case <-stopChan:
+			log.Println("配置检查已停止")
+			return
+		default:
+			nodePath := filepath.Join(fusionDir, "node.conf")
+			info, err := os.Stat(nodePath)
+			
+			if err != nil {
+				if os.IsNotExist(err) {
+					log.Println("node.conf 不存在，执行更新")
+					if err := updateNodes(); err != nil {
+						log.Printf("更新节点失败: %v", err)
+					}
+				} else {
+					log.Printf("检查 node.conf 失败: %v", err)
 				}
 			} else {
-				log.Printf("检查 node.conf 失败: %v", err)
-			}
-		} else {
-			// 检查文件是否超过24小时
-			if time.Since(info.ModTime()) > updateInterval {
-				log.Println("node.conf 超过24小时，执行更新")
-				if err := updateNodes(); err != nil {
-					log.Printf("更新节点失败: %v", err)
+				// 检查文件是否超过24小时
+				if time.Since(info.ModTime()) > updateInterval {
+					log.Println("node.conf 超过24小时，执行更新")
+					if err := updateNodes(); err != nil {
+						log.Printf("更新节点失败: %v", err)
+					}
 				}
 			}
-		}
 
-		time.Sleep(checkInterval)
+			// 使用 select 来检查停止信号
+			select {
+			case <-stopChan:
+				log.Println("配置检查已停止")
+				return
+			case <-time.After(checkInterval):
+				// 继续下一次检查
+			}
+		}
 	}
 }
 
 func main() {
-	log.Printf("Fusion v%s 启动，TOKEN: %s", Version, TOKEN)
-
 	// 捕获关闭信号
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -179,8 +190,7 @@ func main() {
 	// 启动配置检查
 	stopCheck := make(chan struct{})
 	go func() {
-		checkNodeConfig()
-		close(stopCheck)
+		checkNodeConfig(stopCheck)
 	}()
 
 	// 启动HTTP服务器

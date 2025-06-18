@@ -29,6 +29,7 @@ func updateNodes() error {
 	}
 	
 	nodes := make(map[string][]string)
+	var nodesMutex sync.Mutex
 
 	// 并行获取节点
 	var wg sync.WaitGroup
@@ -60,7 +61,9 @@ func updateNodes() error {
 			if subNodes, err := fetchSubscription(url); err != nil {
 				log.Printf("获取订阅失败 %s: %v", name, err)
 			} else {
+				nodesMutex.Lock()
 				nodes[name] = subNodes
+				nodesMutex.Unlock()
 			}
 		}(name, url)
 	}
@@ -195,15 +198,15 @@ func fetchSubscription(url string) ([]string, error) {
 
 func processNode(source, node string) (string, error) {
 	// 预处理节点，获取域名IP
-	node, err := processIngressNode(node)
+	processedNode, err := processIngressNode(node)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("获取位置信息失败: %v", err)
 	}
 
 	// 获取节点信息
-	info, err := getEgressInfo(node)
+	info, err := getEgressInfo(processedNode)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("获取trace信息失败: %v", err)
 	}
 
 	// 重命名节点
@@ -211,6 +214,7 @@ func processNode(source, node string) (string, error) {
 	if len(parts) != 2 {
 		return "", fmt.Errorf("无效的节点格式")
 	}
+
 	// 格式化节点名称: {机场名} {iso二字代码}{旗帜emoji}-T{trace节点数}🔀{nat类型}-{两位计数编号}
 	newName := fmt.Sprintf("%s %s%s-T%d🔀%s-%02d",
 		strings.TrimSpace(source),
