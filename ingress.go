@@ -15,7 +15,7 @@ func processIngressNode(node string) (string, error) {
 	}
 
 	name, config := parts[0], parts[1]
-	params := parseParams(config)
+	params := parseIngressParams(config)
 
 	// 判断代理类型
 	proxyType := getProxyType(config)
@@ -93,7 +93,7 @@ func addSNI(config string, server string) string {
 	return strings.Join(parts, ",")
 }
 
-func parseParams(config string) map[string]string {
+func parseIngressParams(config string) map[string]string {
 	params := make(map[string]string)
 	parts := strings.Split(config, ",")
 
