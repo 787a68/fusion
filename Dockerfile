@@ -12,8 +12,10 @@ COPY . .
 # 接收版本参数
 ARG VERSION=dev
 
-# 编译（添加编译选项和版本信息）
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.Version=${VERSION}" -o fusion .
+# 初始化Go模块并编译
+RUN go mod init fusion && \
+    go mod tidy && \
+    CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.Version=${VERSION}" -o fusion .
 
 # 最终镜像
 FROM alpine:latest
