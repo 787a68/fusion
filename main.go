@@ -3,10 +3,12 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"sync"
 	"time"
@@ -68,7 +70,12 @@ func setupLogger() {
 		log.Fatalf("打开日志文件失败: %v", err)
 	}
 	logFile = f
-	log.SetOutput(f)
+
+	// 创建多输出写入器
+	multiWriter := io.MultiWriter(os.Stdout, f)
+	
+	// 设置日志格式
+	log.SetOutput(multiWriter)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	// 启动日志清理协程
@@ -95,6 +102,13 @@ func cleanOldLogs() {
 			continue
 		}
 
+		// 按修改时间排序
+		type fileInfo struct {
+			name    string
+			modTime time.Time
+		}
+		var fileList []fileInfo
+
 		for _, file := range files {
 			if file.IsDir() {
 				continue
@@ -110,10 +124,25 @@ func cleanOldLogs() {
 				continue
 			}
 
-			if time.Since(fileDate) > 7*24*time.Hour {
-				path := filepath.Join(logDir, name)
+			fileList = append(fileList, fileInfo{
+				name:    name,
+				modTime: fileDate,
+			})
+		}
+
+		// 按时间排序
+		sort.Slice(fileList, func(i, j int) bool {
+			return fileList[i].modTime.After(fileList[j].modTime)
+		})
+
+		// 保留最近7天的日志，删除其他
+		for i, file := range fileList {
+			if i >= 7 {
+				path := filepath.Join(logDir, file.name)
 				if err := os.Remove(path); err != nil {
 					log.Printf("删除过期日志失败 %s: %v", path, err)
+				} else {
+					log.Printf("已删除过期日志: %s", file.name)
 				}
 			}
 		}

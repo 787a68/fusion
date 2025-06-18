@@ -33,13 +33,27 @@ func updateNodes() error {
 	// 并行获取节点
 	var wg sync.WaitGroup
 	for _, sub := range subList {
-		parts := strings.Split(sub, "=")
-		if len(parts) != 2 {
-			log.Printf("无效的订阅格式: %s", sub)
+		// 处理订阅链接格式
+		var name, url string
+		if strings.Contains(sub, "=") {
+			parts := strings.SplitN(sub, "=", 2)
+			if len(parts) != 2 {
+				log.Printf("无效的订阅格式: %s", sub)
+				continue
+			}
+			name, url = parts[0], parts[1]
+		} else {
+			// 如果没有指定名称，使用默认名称
+			name = "Default"
+			url = sub
+		}
+
+		// 验证URL格式
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			log.Printf("无效的URL格式: %s", url)
 			continue
 		}
 
-		name, url := parts[0], parts[1]
 		wg.Add(1)
 		go func(name, url string) {
 			defer wg.Done()
@@ -61,13 +75,23 @@ func updateNodes() error {
 	allNodes := make([]string, 0)
 	for source, sourceNodes := range nodes {
 		for _, node := range sourceNodes {
+			// 跳过空节点
+			if strings.TrimSpace(node) == "" {
+				continue
+			}
+			
 			processedNode, err := processNode(source, node)
 			if err != nil {
-				log.Printf("处理节点失败: %v", err)
+				log.Printf("处理节点失败 [%s]: %v", node, err)
 				continue
 			}
 			allNodes = append(allNodes, processedNode)
 		}
+	}
+
+	// 检查是否成功处理了任何节点
+	if len(allNodes) == 0 {
+		return fmt.Errorf("没有成功处理任何节点")
 	}
 
 	// 写入配置文件

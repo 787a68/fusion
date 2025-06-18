@@ -19,7 +19,7 @@ jobs:
           go-version: 'stable'
           cache: false
       
-      - name: Ensure go.mod exists and tidy dependencies
+      - name: Generate go.sum
         run: |
           if [ ! -f go.mod ]; then
             go mod init fusion
@@ -28,12 +28,16 @@ jobs:
           if [ ! -f go.sum ]; then
             go mod tidy
           fi
+          cat go.sum
 
       - name: Set up Go with cache
         uses: actions/setup-go@v4
         with:
           go-version: 'stable'
           cache: true
+          cache-dependency-path: |
+            **/go.sum
+            **/go.mod
 
       - name: Build Go code
         run: |
