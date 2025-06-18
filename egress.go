@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os/exec"
@@ -163,57 +164,104 @@ func getLocationInfo(node string) (string, string, error) {
 	// 获取配置部分并去除空格
 	config := strings.TrimSpace(parts[1])
 	params := parseParams(config)
-	ip := params["server"]
-	if ip == "" {
+	serverAddr := params["server"]
+	if serverAddr == "" {
 		return "", "", fmt.Errorf("未找到服务器地址")
+	}
+
+	// 获取代理类型
+	proxyType := strings.ToLower(params["type"])
+	if proxyType == "" {
+		// 如果没有指定类型，尝试从配置中推断
+		if strings.HasPrefix(config, "ss://") {
+			proxyType = "ss"
+		} else if strings.HasPrefix(config, "vmess://") {
+			proxyType = "vmess"
+		} else if strings.HasPrefix(config, "trojan://") {
+			proxyType = "trojan"
+		} else if strings.HasPrefix(config, "http://") || strings.HasPrefix(config, "https://") {
+			proxyType = "http"
+		} else if strings.HasPrefix(config, "socks5://") {
+			proxyType = "socks5"
+		} else {
+			return "", "", fmt.Errorf("不支持的代理类型")
+		}
+	}
+
+	// 构建代理URL
+	var proxyURL string
+	switch proxyType {
+	case "ss", "ssr", "vmess", "trojan":
+		// 这些协议需要完整的配置URL
+		proxyURL = config
+	case "http", "https":
+		proxyURL = fmt.Sprintf("%s://%s", proxyType, serverAddr)
+	case "socks5":
+		proxyURL = fmt.Sprintf("socks5://%s", serverAddr)
+	default:
+		return "", "", fmt.Errorf("不支持的代理类型: %s", proxyType)
+	}
+
+	// 使用 curl 通过节点查询出口 IP
+	cmd := exec.Command("curl", "-s", "--proxy", proxyURL, "https://api.ipify.org?format=json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("获取出口IP失败: %v", err)
+	}
+
+	var result struct {
+		IP string `json:"ip"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		return "", "", fmt.Errorf("解析出口IP失败: %v", err)
 	}
 
 	// 检查缓存
 	locationMutex.RLock()
-	if info, ok := locationCache[ip]; ok {
+	if info, ok := locationCache[result.IP]; ok {
 		locationMutex.RUnlock()
 		return info.ISOCode, info.Flag, nil
 	}
 	locationMutex.RUnlock()
 
-	// 使用ipapi.co的免费API
-	resp, err := http.Get(fmt.Sprintf("https://ipapi.co/%s/json/", ip))
+	// 使用ipapi.co的免费API查询地理位置
+	resp, err := http.Get(fmt.Sprintf("https://ipapi.co/%s/json/", result.IP))
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
 
-	var result struct {
+	var locationResult struct {
 		CountryCode string `json:"country_code"`
 		Error      bool   `json:"error"`
 		Reason     string `json:"reason"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&locationResult); err != nil {
 		return "", "", err
 	}
 
-	if result.Error {
-		return "", "", fmt.Errorf("IP API错误: %s", result.Reason)
+	if locationResult.Error {
+		return "", "", fmt.Errorf("IP API错误: %s", locationResult.Reason)
 	}
 
 	// 获取国家代码对应的emoji旗帜
-	flag := getCountryFlag(result.CountryCode)
+	flag := getCountryFlag(locationResult.CountryCode)
 
 	// 更新缓存
 	locationMutex.Lock()
-	locationCache[ip] = struct {
+	locationCache[result.IP] = struct {
 		ISOCode string
 		Flag    string
 		Time    time.Time
 	}{
-		ISOCode: result.CountryCode,
+		ISOCode: locationResult.CountryCode,
 		Flag:    flag,
 		Time:    time.Now(),
 	}
 	locationMutex.Unlock()
 
-	return result.CountryCode, flag, nil
+	return locationResult.CountryCode, flag, nil
 }
 
 func getTraceCount(node string) (int, error) {
