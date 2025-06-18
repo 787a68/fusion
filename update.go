@@ -124,7 +124,7 @@ func fetchSubscription(url string) ([]string, error) {
 		}
 
 		// 查找下一个Section
-		endIdx := 0
+		endIdx := len(content)  // 初始化为内容长度
 		for _, section := range []string{"[Rule]", "[RULE]", "[Proxy Group]", "[PROXY-GROUP]"} {
 			if idx := strings.Index(content[startIdx:], section); idx != -1 {
 				if startIdx+idx < endIdx {
@@ -132,6 +132,12 @@ func fetchSubscription(url string) ([]string, error) {
 				}
 			}
 		}
+
+		// 确保切片范围有效
+		if startIdx >= endIdx {
+			return nil, fmt.Errorf("无效的配置格式：无法找到有效的节点部分")
+		}
+
 		content = content[startIdx:endIdx]
 
 		// 过滤节点
@@ -145,6 +151,11 @@ func fetchSubscription(url string) ([]string, error) {
 				continue
 			}
 			nodes = append(nodes, line)
+		}
+
+		// 确保至少有一个有效节点
+		if len(nodes) == 0 {
+			return nil, fmt.Errorf("未找到有效的节点配置")
 		}
 
 		return nodes, nil

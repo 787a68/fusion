@@ -15,7 +15,7 @@ import (
 var (
 	TOKEN     string
 	Version   = "dev"    // 将被构建时的版本替换
-	fusionDir = filepath.Join("/", "fusion")  // 使用filepath.Join确保跨平台兼容
+	fusionDir = filepath.Join("/", "data", "fusion")  // 使用 /data/fusion 作为工作目录
 	logDir    string
 	mu        sync.Mutex
 	logFile   *os.File  // 保存当前日志文件句柄

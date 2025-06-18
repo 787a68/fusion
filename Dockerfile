@@ -23,7 +23,7 @@ FROM alpine:latest
 RUN apk add --no-cache ca-certificates tzdata bind-tools traceroute curl iputils
 
 # 创建工作目录和日志目录
-RUN mkdir -p /fusion/logs
+RUN mkdir -p /data/fusion/logs
 
 # 从builder复制编译好的程序
 COPY --from=builder /app/fusion /usr/local/bin/
@@ -35,7 +35,7 @@ ENV TZ=Asia/Shanghai
 EXPOSE 8080
 
 # 设置持久化卷
-VOLUME ["/fusion"]
+VOLUME ["/data/fusion"]
 
 # 运行程序
 CMD ["fusion"]
