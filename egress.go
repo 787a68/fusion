@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -38,6 +43,21 @@ var (
 		Time time.Time
 	})
 	natMutex sync.RWMutex
+
+	mihomoProcess *os.Process
+	mihomoPort    = 7890
+	mihomoMutex   sync.Mutex
+	mihomoStarted bool
+)
+
+const (
+	// 全局超时设置
+	mihomoStartTimeout = 5 * time.Second    // mihomo 启动超时
+	proxyUpdateTimeout = 2 * time.Second    // 代理配置更新超时
+	locationTimeout    = 3 * time.Second    // 位置信息获取超时
+	traceTimeout       = 20 * time.Second   // trace 检测超时
+	natTimeout         = 3 * time.Second    // NAT 检测超时
+	totalTimeout       = 25 * time.Second   // 总超时时间
 )
 
 func init() {
@@ -69,15 +89,26 @@ func init() {
 }
 
 func getEgressInfo(node string) (*NodeInfo, error) {
+	// 确保 mihomo 已启动
+	if err := startMihomo(); err != nil {
+		return nil, fmt.Errorf("启动 mihomo 失败: %v", err)
+	}
+
+	// 更新代理配置
+	if err := updateMihomoProxy(node); err != nil {
+		return nil, fmt.Errorf("更新代理配置失败: %v", err)
+	}
+
 	var info NodeInfo
 	var wg sync.WaitGroup
 	var errChan = make(chan error, 3)
 	var doneChan = make(chan struct{})
 	var once sync.Once
+	var geoDone = make(chan struct{})
 
-	// 设置超时控制
+	// 设置总超时控制
 	go func() {
-		time.Sleep(10 * time.Second)
+		time.Sleep(totalTimeout)
 		once.Do(func() {
 			close(doneChan)
 		})
@@ -92,18 +123,29 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 		iso, flag, err := getLocationInfo(node)
 		if err != nil {
 			select {
-			case errChan <- fmt.Errorf("获取位置信息失败: %v", err):
+			case errChan <- fmt.Errorf("地理位置测试失败: %v", err):
 			case <-doneChan:
 			}
 			return
 		}
 		info.ISOCode = iso
 		info.Flag = flag
+		close(geoDone)  // 标记地理位置测试完成
 	}()
 
 	// 2. 获取trace节点数
 	go func() {
 		defer wg.Done()
+		// 等待地理位置测试完成或失败
+		select {
+		case <-geoDone:
+			// 地理位置测试成功，检查是否为香港
+			if info.ISOCode != "HK" {
+				return // 不是香港，跳过 trace 检测
+			}
+		case <-doneChan:
+			return
+		}
 		count, err := getTraceCount(node)
 		if err != nil {
 			select {
@@ -118,6 +160,16 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 	// 3. 获取NAT类型
 	go func() {
 		defer wg.Done()
+		// 等待地理位置测试完成或失败
+		select {
+		case <-geoDone:
+			// 地理位置测试成功，检查是否为香港
+			if info.ISOCode != "HK" {
+				return // 不是香港，跳过 NAT 检测
+			}
+		case <-doneChan:
+			return
+		}
 		natType, err := getNATType(node)
 		if err != nil {
 			select {
@@ -148,154 +200,75 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 		return &info, nil
 	case err := <-errChan:
 		return nil, err
-	case <-time.After(3 * time.Second):
+	case <-time.After(totalTimeout):
 		return nil, fmt.Errorf("获取节点信息超时")
 	}
 }
 
 func getLocationInfo(node string) (string, string, error) {
-	// 移除节点名称部分
-	parts := strings.SplitN(node, "=", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("无效的节点格式")
+	// 使用代理获取出口IP
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: func(_ *http.Request) (*url.URL, error) {
+				return url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mihomoPort))
+			},
+		},
+		Timeout: locationTimeout,
 	}
 
-	// 获取配置部分并去除空格
-	config := strings.TrimSpace(parts[1])
-	params := parseParams(config)
-	serverAddr := params["server"]
-	if serverAddr == "" {
-		return "", "", fmt.Errorf("未找到服务器地址")
-	}
-
-	// 获取代理类型
-	proxyType := strings.ToLower(params["type"])
-	if proxyType == "" {
-		// 如果没有指定类型，尝试从配置中推断
-		if strings.HasPrefix(config, "ss://") {
-			proxyType = "ss"
-		} else if strings.HasPrefix(config, "vmess://") {
-			proxyType = "vmess"
-		} else if strings.HasPrefix(config, "trojan://") {
-			proxyType = "trojan"
-		} else if strings.HasPrefix(config, "http://") || strings.HasPrefix(config, "https://") {
-			proxyType = "http"
-		} else if strings.HasPrefix(config, "socks5://") {
-			proxyType = "socks5"
-		} else {
-			return "", "", fmt.Errorf("不支持的代理类型")
-		}
-	}
-
-	// 构建代理URL
-	var proxyURL string
-	switch proxyType {
-	case "ss", "ssr", "vmess", "trojan":
-		// 这些协议需要完整的配置URL
-		proxyURL = config
-	case "http", "https":
-		proxyURL = fmt.Sprintf("%s://%s", proxyType, serverAddr)
-	case "socks5":
-		proxyURL = fmt.Sprintf("socks5://%s", serverAddr)
-	default:
-		return "", "", fmt.Errorf("不支持的代理类型: %s", proxyType)
-	}
-
-	// 使用 curl 通过节点查询出口 IP
-	cmd := exec.Command("curl", "-s", "--proxy", proxyURL, "https://api.ipify.org?format=json")
-	output, err := cmd.CombinedOutput()
+	// 获取出口IP
+	resp, err := client.Get("https://api.ipify.org")
 	if err != nil {
 		return "", "", fmt.Errorf("获取出口IP失败: %v", err)
 	}
-
-	var result struct {
-		IP string `json:"ip"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		return "", "", fmt.Errorf("解析出口IP失败: %v", err)
-	}
-
-	// 检查缓存
-	locationMutex.RLock()
-	if info, ok := locationCache[result.IP]; ok {
-		locationMutex.RUnlock()
-		return info.ISOCode, info.Flag, nil
-	}
-	locationMutex.RUnlock()
-
-	// 使用ipapi.co的免费API查询地理位置
-	resp, err := http.Get(fmt.Sprintf("https://ipapi.co/%s/json/", result.IP))
-	if err != nil {
-		return "", "", err
-	}
 	defer resp.Body.Close()
 
-	var locationResult struct {
-		CountryCode string `json:"country_code"`
-		Error      bool   `json:"error"`
-		Reason     string `json:"reason"`
+	ip, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("读取响应失败: %v", err)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&locationResult); err != nil {
-		return "", "", err
+	// 获取地理位置信息
+	location, err := getLocationFromIP(string(ip))
+	if err != nil {
+		return "", "", fmt.Errorf("获取地理位置信息失败: %v", err)
 	}
 
-	if locationResult.Error {
-		return "", "", fmt.Errorf("IP API错误: %s", locationResult.Reason)
+	// 解析位置信息
+	parts := strings.Split(location, " ")
+	if len(parts) < 2 {
+		return "", "", fmt.Errorf("无效的位置信息格式")
 	}
 
-	// 获取国家代码对应的emoji旗帜
-	flag := getCountryFlag(locationResult.CountryCode)
+	country := parts[0]
+	code := getCountryCode(country)
+	flag := getCountryFlag(code)
 
-	// 更新缓存
-	locationMutex.Lock()
-	locationCache[result.IP] = struct {
-		ISOCode string
-		Flag    string
-		Time    time.Time
-	}{
-		ISOCode: locationResult.CountryCode,
-		Flag:    flag,
-		Time:    time.Now(),
-	}
-	locationMutex.Unlock()
-
-	return locationResult.CountryCode, flag, nil
+	return code, flag, nil
 }
 
 func getTraceCount(node string) (int, error) {
-	parts := strings.SplitN(node, "=", 2)
-	if len(parts) != 2 {
-		return 0, fmt.Errorf("无效的节点格式")
-	}
+	// 使用代理执行 trace 命令
+	ctx, cancel := context.WithTimeout(context.Background(), traceTimeout)
+	defer cancel()
 
-	// 获取配置部分并去除空格
-	config := strings.TrimSpace(parts[1])
-	params := parseParams(config)
-	ip := params["server"]
-	if ip == "" {
-		return 0, fmt.Errorf("未找到服务器地址")
-	}
-
-	// 根据操作系统选择不同的trace命令
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("tracert", "-h", "30", "-w", "1000", ip)
-	default:
-		cmd = exec.Command("traceroute", "-m", "30", "-w", "1", ip)
-	}
-
+	// 增加 tracert 的超时参数
+	cmd := exec.CommandContext(ctx, "tracert", "-d", "-h", "15", "-w", "1000", "8.8.8.8")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("http_proxy=http://127.0.0.1:%d", mihomoPort))
+	
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return 0, fmt.Errorf("trace失败: %v", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			return 0, fmt.Errorf("trace 检测超时")
+		}
+		return 0, fmt.Errorf("执行 trace 失败: %v", err)
 	}
 
-	// 计算有效跳数
+	// 计算节点数
 	lines := strings.Split(string(output), "\n")
 	count := 0
 	for _, line := range lines {
-		if strings.Contains(line, "ms") && !strings.Contains(line, "*") {
+		if strings.Contains(line, "ms") {
 			count++
 		}
 	}
@@ -304,69 +277,33 @@ func getTraceCount(node string) (int, error) {
 }
 
 func getNATType(node string) (string, error) {
-	parts := strings.SplitN(node, "=", 2)
-	if len(parts) != 2 {
-		return "", fmt.Errorf("无效的节点格式")
-	}
+	// 使用代理执行 NAT 检测
+	ctx, cancel := context.WithTimeout(context.Background(), natTimeout)
+	defer cancel()
 
-	// 获取配置部分并去除空格
-	config := strings.TrimSpace(parts[1])
-	params := parseParams(config)
-	serverAddr := params["server"]
-	if serverAddr == "" {
-		return "", fmt.Errorf("未找到服务器地址")
-	}
-
-	// 检查缓存
-	natMutex.RLock()
-	if info, ok := natCache[serverAddr]; ok {
-		natMutex.RUnlock()
-		return info.Type, nil
-	}
-	natMutex.RUnlock()
-
-	// 创建UDP连接
-	conn, err := net.Dial("udp", serverAddr+":3478") // STUN默认端口
-	if err != nil {
-		return "D", nil // 如果无法建立UDP连接，假设为Symmetric NAT
-	}
-	defer conn.Close()
-
-	// 发送STUN请求
-	// 这里简化了STUN协议的实现，实际应该使用完整的STUN客户端库
-	_, err = conn.Write([]byte{0x00, 0x01, 0x00, 0x00}) // 简化的STUN请求
-	if err != nil {
-		return "C", nil
-	}
-
-	// 设置读取超时
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+	cmd := exec.CommandContext(ctx, "stunclient", "stun.l.google.com", "19302")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("http_proxy=http://127.0.0.1:%d", mihomoPort))
 	
-	// 尝试读取响应
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		if err, ok := err.(net.Error); ok && err.Timeout() {
-			return "B", nil // 超时可能意味着受限的NAT
+		if ctx.Err() == context.DeadlineExceeded {
+			return "Unknown", fmt.Errorf("NAT 检测超时")
 		}
-		return "D", nil
+		return "Unknown", fmt.Errorf("执行 NAT 检测失败: %v", err)
 	}
 
-	if n > 0 {
-		natType := "A" // 成功收到响应，可能是Full Cone NAT
-
-		// 更新缓存
-		natMutex.Lock()
-		natCache[serverAddr] = struct {
-			Type string
-			Time time.Time
-		}{Type: natType, Time: time.Now()}
-		natMutex.Unlock()
-
-		return natType, nil
+	// 解析 NAT 类型
+	if strings.Contains(string(output), "Full Cone") {
+		return "FullCone", nil
+	} else if strings.Contains(string(output), "Restricted Cone") {
+		return "RestrictedCone", nil
+	} else if strings.Contains(string(output), "Port Restricted Cone") {
+		return "PortRestrictedCone", nil
+	} else if strings.Contains(string(output), "Symmetric") {
+		return "Symmetric", nil
 	}
 
-	return "C", nil // 默认返回Port Restricted NAT
+	return "Unknown", nil
 }
 
 func getCountryFlag(code string) string {
@@ -402,4 +339,159 @@ func parseParams(config string) map[string]string {
 	}
 
 	return params
+}
+
+// 启动 mihomo 代理服务器
+func startMihomo() error {
+	mihomoMutex.Lock()
+	defer mihomoMutex.Unlock()
+
+	if mihomoStarted {
+		return nil
+	}
+
+	// 创建基础配置文件
+	config := fmt.Sprintf(`{
+		"port": %d,
+		"socks-port": %d,
+		"allow-lan": true,
+		"mode": "rule",
+		"log-level": "info",
+		"external-controller": "127.0.0.1:%d",
+		"proxies": [],
+		"proxy-groups": [
+			{
+				"name": "proxy",
+				"type": "select",
+				"proxies": ["proxy"]
+			}
+		],
+		"rules": [
+			"MATCH,proxy"
+		]
+	}`, mihomoPort, mihomoPort+1, mihomoPort+2)
+
+	// 创建临时配置文件
+	tmpFile, err := os.CreateTemp("", "mihomo-*.yaml")
+	if err != nil {
+		return fmt.Errorf("创建临时配置文件失败: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	// 写入配置
+	if _, err := tmpFile.WriteString(config); err != nil {
+		return fmt.Errorf("写入配置文件失败: %v", err)
+	}
+	tmpFile.Close()
+
+	// 启动 mihomo
+	cmd := exec.Command("mihomo", "-f", tmpFile.Name())
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("启动 mihomo 失败: %v", err)
+	}
+
+	mihomoProcess = cmd.Process
+
+	// 等待 mihomo 启动，使用更短的检查间隔
+	for i := 0; i < 10; i++ {
+		if isPortOpen(mihomoPort) && isPortOpen(mihomoPort+2) {
+			mihomoStarted = true
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("mihomo 启动超时")
+}
+
+// 更新 mihomo 代理配置
+func updateMihomoProxy(node string) error {
+	// 确保 mihomo 已启动
+	if err := startMihomo(); err != nil {
+		return err
+	}
+
+	// 构建完整的代理配置
+	proxyConfig := fmt.Sprintf(`{
+		"proxies": [
+			%s
+		],
+		"proxy-groups": [
+			{
+				"name": "proxy",
+				"type": "select",
+				"proxies": ["proxy"]
+			}
+		],
+		"rules": [
+			"MATCH,proxy"
+		]
+	}`, node)
+
+	// 通过 API 更新配置，添加超时控制
+	client := &http.Client{
+		Timeout: proxyUpdateTimeout,
+	}
+	
+	resp, err := client.Put(
+		fmt.Sprintf("http://127.0.0.1:%d/configs", mihomoPort+2),
+		"application/json",
+		strings.NewReader(proxyConfig),
+	)
+	if err != nil {
+		return fmt.Errorf("更新代理配置失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("更新代理配置失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	// 等待配置生效
+	time.Sleep(500 * time.Millisecond)
+
+	return nil
+}
+
+// 清理资源
+func cleanup() {
+	if mihomoProcess != nil {
+		mihomoProcess.Kill()
+		mihomoProcess = nil
+		mihomoStarted = false
+	}
+}
+
+// 从IP获取地理位置信息
+func getLocationFromIP(ip string) (string, error) {
+	// 检查缓存
+	if info, ok := locationCache.Load(ip); ok {
+		return info.(string), nil
+	}
+
+	// 使用 ip-api.com 获取地理位置信息
+	resp, err := http.Get(fmt.Sprintf("http://ip-api.com/json/%s", ip))
+	if err != nil {
+		return "", fmt.Errorf("请求 ip-api.com 失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Country     string `json:"country"`
+		CountryCode string `json:"countryCode"`
+		Region      string `json:"region"`
+		City        string `json:"city"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	// 构建位置信息
+	location := fmt.Sprintf("%s %s", result.Country, result.City)
+	
+	// 缓存结果
+	locationCache.Store(ip, location)
+	
+	return location, nil
 }

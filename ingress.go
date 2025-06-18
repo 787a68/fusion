@@ -42,7 +42,7 @@ func processIngressNode(node string) (string, error) {
 	// 检查是否为IP地址
 	if net.ParseIP(server) != nil {
 		// 如果是IP地址，直接返回处理后的节点
-		if params["sni"] == "" {
+		if params["sni"] == "" && needsTLS(proxyType) {
 			config = addSNI(config, server)
 		}
 		return fmt.Sprintf("%s = %s", name, config), nil
@@ -71,8 +71,8 @@ func processIngressNode(node string) (string, error) {
 		return "", fmt.Errorf("未找到IP地址: %s", server)
 	}
 
-	// 如果没有SNI参数，添加原始域名作为SNI
-	if params["sni"] == "" {
+	// 只对需要 TLS 的协议且没有 SNI 的添加 SNI
+	if params["sni"] == "" && needsTLS(proxyType) {
 		config = addSNI(config, server)
 	}
 
@@ -137,4 +137,20 @@ func parseIngressParams(config string) map[string]string {
 	}
 
 	return params
+}
+
+// 判断协议是否需要 TLS
+func needsTLS(proxyType string) bool {
+	// 白名单：需要 TLS 的协议
+	tlsTypes := map[string]bool{
+		"vmess": true,
+		"trojan": true,
+		"https": true,
+		"socks5-tls": true,
+		"snell": true,
+		"tuic": true,
+		"hysteria": true,
+		"vless": true,
+	}
+	return tlsTypes[proxyType]
 }

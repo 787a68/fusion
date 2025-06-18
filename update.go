@@ -239,14 +239,25 @@ func processNode(source, node string) (string, error) {
 			natType = "D"
 		}
 
-		// 格式化节点名称: {机场名} {iso二字代码}{旗帜emoji}-T{trace节点数}🔀{nat类型字母}-{两位计数编号}
-		newName := fmt.Sprintf("%s %s%s-T%d🔀%s-%02d",
-			strings.TrimSpace(source),
-			strings.ToUpper(info.ISOCode),
-			info.Flag,
-			info.TraceCount,
-			natType,
-			info.Count)
+		// 格式化节点名称
+		var newName string
+		if info.ISOCode == "HK" {
+			// 香港节点显示完整信息: {机场名} {iso二字代码}{旗帜emoji}-T{trace节点数}🔀{nat类型字母}-{两位计数编号}
+			newName = fmt.Sprintf("%s %s%s-T%d🔀%s-%02d",
+				strings.TrimSpace(source),
+				strings.ToUpper(info.ISOCode),
+				info.Flag,
+				info.TraceCount,
+				natType,
+				info.Count)
+		} else {
+			// 非香港节点只显示基本信息: {机场名} {iso二字代码}{旗帜emoji}-{两位计数编号}
+			newName = fmt.Sprintf("%s %s%s-%02d",
+				strings.TrimSpace(source),
+				strings.ToUpper(info.ISOCode),
+				info.Flag,
+				info.Count)
+		}
 
 		// 转换布尔值
 		config := strings.TrimSpace(parts[1])
