@@ -102,9 +102,8 @@ func getProxyType(config string) string {
 	return ""
 }
 
-func addSNI(config, domain string) string {
-	if strings.HasSuffix(config, ",") {
-		return config + " sni=" + domain
-	}
-	return config + ", sni=" + domain
+func addSNI(config string, server string) string {
+	parts := strings.Split(config, ",")
+	parts = append(parts, fmt.Sprintf("sni=%s", server))
+	return strings.Join(parts, ",")
 }

@@ -16,15 +16,17 @@ func updateNodes() error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// 获取订阅链接	subs := strings.TrimSpace(os.Getenv("SUB"))
+	// 获取订阅链接
+	subs := strings.TrimSpace(os.Getenv("SUB"))
 	if subs == "" {
 		return fmt.Errorf("未设置SUB环境变量")
 	}
 
-	// 拆分订阅链接
-	subList := strings.Split(subs, "||")
+	// 拆分订阅链接	subList := strings.Split(subs, "||")
 	if len(subList) == 0 {
 		return fmt.Errorf("SUB环境变量格式错误")
+	}
+	
 	nodes := make(map[string][]string)
 
 	// 并行获取节点
@@ -106,45 +108,45 @@ func fetchSubscription(url string) ([]string, error) {
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("HTTP状态码错误: %d", resp.StatusCode)
 			continue
-		}
-	content := string(body)
-	// 提取[Proxy]部分，支持大小写
-	startIdx := -1
-	for _, header := range []string{"[Proxy]", "[proxy]", "[PROXY]"} {
-		if idx := strings.Index(content, header); idx != -1 {
-			startIdx = idx + len(header)
-			break
-		}
-	}
-	if startIdx == -1 {
-		return nil, fmt.Errorf("未找到[Proxy]部分")
-	}
-
-	// 查找下一个Section
-	endIdx := len(content)
-	for _, section := range []string{"[Rule]", "[RULE]", "[Proxy Group]", "[PROXY-GROUP]"} {
-		if idx := strings.Index(content[startIdx:], section); idx != -1 {
-			if startIdx+idx < endIdx {
-				endIdx = startIdx + idx
+		}		content := string(body)
+		// 提取[Proxy]部分，支持大小写
+		startIdx := -1
+		for _, header := range []string{"[Proxy]", "[proxy]", "[PROXY]"} {
+			if idx := strings.Index(content, header); idx != -1 {
+				startIdx = idx + len(header)
+				break
 			}
 		}
-	}
-	content = content[startIdx:endIdx]
-
-	// 过滤节点
-	var nodes []string
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+		if startIdx == -1 {
+			return nil, fmt.Errorf("未找到[Proxy]部分")
 		}
-		if strings.Contains(line, "reject") || strings.Contains(line, "direct") {
-			continue
-		}
-		nodes = append(nodes, line)
-	}
 
-	return nodes, nil
+	// 查找下一个Section		endIdx := len(content)
+		for _, section := range []string{"[Rule]", "[RULE]", "[Proxy Group]", "[PROXY-GROUP]"} {
+			if idx := strings.Index(content[startIdx:], section); idx != -1 {
+				if startIdx+idx < endIdx {
+					endIdx = startIdx + idx
+				}
+			}
+		}
+		content = content[startIdx:endIdx]
+
+		// 过滤节点
+		var nodes []string
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if strings.Contains(line, "reject") || strings.Contains(line, "direct") {
+				continue
+			}
+			nodes = append(nodes, line)
+		}
+
+		return nodes, nil
+	}
+	return nil, lastErr
 }
 
 func processNode(source, node string) (string, error) {
