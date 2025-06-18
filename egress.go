@@ -39,8 +39,8 @@ var (
 	
 	// NAT类型缓存
 	natCache = make(map[string]struct {
-		Type string
-		Time time.Time
+		NATType string
+		Time    time.Time
 	})
 	natMutex sync.RWMutex
 
@@ -233,8 +233,13 @@ func getTraceCount(node string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), traceTimeout)
 	defer cancel()
 
-	// 增加 tracert 的超时参数
-	cmd := exec.CommandContext(ctx, "tracert", "-d", "-h", "15", "-w", "1000", "8.8.8.8")
+	// 根据操作系统选择命令
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "tracert", "-d", "-h", "15", "-w", "1000", "8.8.8.8")
+	} else {
+		cmd = exec.CommandContext(ctx, "traceroute", "-n", "-m", "15", "-w", "1", "8.8.8.8")
+	}
 	cmd.Env = append(os.Environ(), fmt.Sprintf("http_proxy=http://127.0.0.1:%d", mihomoPort))
 	
 	output, err := cmd.CombinedOutput()
@@ -258,11 +263,25 @@ func getTraceCount(node string) (int, error) {
 }
 
 func getNATType(node string) (string, error) {
+	// 检查缓存
+	natCacheMutex.Lock()
+	if info, ok := natCache[node]; ok {
+		natCacheMutex.Unlock()
+		return info.NATType, nil
+	}
+	natCacheMutex.Unlock()
+
 	// 使用代理执行 NAT 检测
 	ctx, cancel := context.WithTimeout(context.Background(), natTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "stunclient", "stun.l.google.com", "19302")
+	// 检查 stunclient 是否存在
+	stunclientPath, err := exec.LookPath("stunclient")
+	if err != nil {
+		return "Unknown", fmt.Errorf("stunclient 未安装: %v", err)
+	}
+
+	cmd := exec.CommandContext(ctx, stunclientPath, "stun.l.google.com", "19302")
 	cmd.Env = append(os.Environ(), fmt.Sprintf("http_proxy=http://127.0.0.1:%d", mihomoPort))
 	
 	output, err := cmd.CombinedOutput()
@@ -274,17 +293,31 @@ func getNATType(node string) (string, error) {
 	}
 
 	// 解析 NAT 类型
+	var natType string
 	if strings.Contains(string(output), "Full Cone") {
-		return "FullCone", nil
+		natType = "FullCone"
 	} else if strings.Contains(string(output), "Restricted Cone") {
-		return "RestrictedCone", nil
+		natType = "RestrictedCone"
 	} else if strings.Contains(string(output), "Port Restricted Cone") {
-		return "PortRestrictedCone", nil
+		natType = "PortRestrictedCone"
 	} else if strings.Contains(string(output), "Symmetric") {
-		return "Symmetric", nil
+		natType = "Symmetric"
+	} else {
+		natType = "Unknown"
 	}
 
-	return "Unknown", nil
+	// 缓存结果
+	natCacheMutex.Lock()
+	natCache[node] = struct {
+		NATType string
+		Time    time.Time
+	}{
+		NATType: natType,
+		Time:    time.Now(),
+	}
+	natCacheMutex.Unlock()
+
+	return natType, nil
 }
 
 func getCountryFlag(code string) string {
@@ -367,16 +400,27 @@ func startMihomo() error {
 	if err != nil {
 		return fmt.Errorf("创建临时配置文件失败: %v", err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+	}()
 
 	// 写入配置
 	if _, err := tmpFile.WriteString(config); err != nil {
 		return fmt.Errorf("写入配置文件失败: %v", err)
 	}
-	tmpFile.Close()
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("关闭配置文件失败: %v", err)
+	}
+
+	// 检查 mihomo 是否存在
+	mihomoPath, err := exec.LookPath("mihomo")
+	if err != nil {
+		return fmt.Errorf("mihomo 未安装: %v", err)
+	}
 
 	// 启动 mihomo
-	cmd := exec.Command("mihomo", "-f", tmpFile.Name())
+	cmd := exec.Command(mihomoPath, "-f", tmpFile.Name())
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 mihomo 失败: %v", err)
 	}
@@ -460,9 +504,12 @@ func cleanup() {
 // 从IP获取地理位置信息
 func getLocationFromIP(ip string) (string, error) {
 	// 检查缓存
-	if info, ok := locationCache.Load(ip); ok {
-		return info.(string), nil
+	locationCacheMutex.Lock()
+	if info, ok := locationCache[ip]; ok {
+		locationCacheMutex.Unlock()
+		return info.ISOCode + " " + info.City, nil
 	}
+	locationCacheMutex.Unlock()
 
 	// 创建带超时的 HTTP 客户端
 	client := &http.Client{
@@ -491,7 +538,17 @@ func getLocationFromIP(ip string) (string, error) {
 	location := fmt.Sprintf("%s %s", result.CountryCode, result.City)
 	
 	// 缓存结果
-	locationCache.Store(ip, location)
+	locationCacheMutex.Lock()
+	locationCache[ip] = struct {
+		ISOCode string
+		City    string
+		Time    time.Time
+	}{
+		ISOCode: result.CountryCode,
+		City:    result.City,
+		Time:    time.Now(),
+	}
+	locationCacheMutex.Unlock()
 	
 	return location, nil
 }
