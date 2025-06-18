@@ -25,6 +25,12 @@ jobs:
           go mod tidy
           go build -v ./...
       
+      - name: Ensure go.sum is generated
+        run: |
+          if [ ! -f go.sum ]; then
+            go mod tidy
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
