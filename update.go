@@ -198,36 +198,69 @@ func fetchSubscription(url string) ([]string, error) {
 
 func processNode(source, node string) (string, error) {
 	// 预处理节点，获取域名IP
-	processedNode, err := processIngressNode(node)
+	processedNodes, err := processIngressNode(node)
 	if err != nil {
 		return "", fmt.Errorf("获取位置信息失败: %v", err)
 	}
 
-	// 获取节点信息
-	info, err := getEgressInfo(processedNode)
-	if err != nil {
-		return "", fmt.Errorf("获取trace信息失败: %v", err)
+	// 处理所有解析出的节点
+	nodeList := strings.Split(processedNodes, "\n")
+	if len(nodeList) == 0 {
+		return "", fmt.Errorf("处理节点后未得到有效节点")
 	}
 
-	// 重命名节点
-	parts := strings.SplitN(node, "=", 2)
-	if len(parts) != 2 {
-		return "", fmt.Errorf("无效的节点格式")
+	// 处理每个节点
+	var processedNodeList []string
+	for _, processedNode := range nodeList {
+		// 获取节点信息
+		info, err := getEgressInfo(processedNode)
+		if err != nil {
+			log.Printf("获取节点信息失败 [%s]: %v", processedNode, err)
+			continue
+		}
+
+		// 重命名节点
+		parts := strings.SplitN(processedNode, "=", 2)
+		if len(parts) != 2 {
+			log.Printf("无效的节点格式: %s", processedNode)
+			continue
+		}
+
+		// 转换NAT类型为字母
+		natType := "D" // Unknown
+		switch info.NATType {
+		case "FullCone":
+			natType = "A"
+		case "RestrictedCone":
+			natType = "B"
+		case "PortRestrictedCone":
+			natType = "C"
+		case "Symmetric":
+			natType = "D"
+		}
+
+		// 格式化节点名称: {机场名} {iso二字代码}{旗帜emoji}-T{trace节点数}🔀{nat类型字母}-{两位计数编号}
+		newName := fmt.Sprintf("%s %s%s-T%d🔀%s-%02d",
+			strings.TrimSpace(source),
+			strings.ToUpper(info.ISOCode),
+			info.Flag,
+			info.TraceCount,
+			natType,
+			info.Count)
+
+		// 转换布尔值
+		config := strings.TrimSpace(parts[1])
+		config = strings.ReplaceAll(config, "true", "1")
+		config = strings.ReplaceAll(config, "false", "0")
+
+		processedNodeList = append(processedNodeList, fmt.Sprintf("%s = %s", newName, config))
 	}
 
-	// 格式化节点名称: {机场名} {iso二字代码}{旗帜emoji}-T{trace节点数}🔀{nat类型}-{两位计数编号}
-	newName := fmt.Sprintf("%s %s%s-T%d🔀%s-%02d",
-		strings.TrimSpace(source),
-		strings.ToUpper(info.ISOCode),
-		info.Flag,
-		info.TraceCount,
-		info.NATType,
-		info.Count)
+	// 如果所有节点都处理失败，返回错误
+	if len(processedNodeList) == 0 {
+		return "", fmt.Errorf("所有节点处理失败")
+	}
 
-	// 转换布尔值
-	config := strings.TrimSpace(parts[1])
-	config = strings.ReplaceAll(config, "true", "1")
-	config = strings.ReplaceAll(config, "false", "0")
-
-	return fmt.Sprintf("%s = %s", newName, config), nil
+	// 返回所有成功处理的节点
+	return strings.Join(processedNodeList, "\n"), nil
 }

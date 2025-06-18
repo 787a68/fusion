@@ -162,15 +162,7 @@ func getLocationInfo(node string) (string, string, error) {
 
 	// 获取配置部分并去除空格
 	config := strings.TrimSpace(parts[1])
-	
-	// 使用 ingress 处理节点
-	processedNode, err := processIngressNode(config)
-	if err != nil {
-		return "", "", fmt.Errorf("处理节点失败: %v", err)
-	}
-
-	// 解析处理后的节点配置
-	params := parseParams(processedNode)
+	params := parseParams(config)
 	serverAddr := params["server"]
 	if serverAddr == "" {
 		return "", "", fmt.Errorf("未找到服务器地址")
@@ -180,15 +172,15 @@ func getLocationInfo(node string) (string, string, error) {
 	proxyType := strings.ToLower(params["type"])
 	if proxyType == "" {
 		// 如果没有指定类型，尝试从配置中推断
-		if strings.HasPrefix(processedNode, "ss://") {
+		if strings.HasPrefix(config, "ss://") {
 			proxyType = "ss"
-		} else if strings.HasPrefix(processedNode, "vmess://") {
+		} else if strings.HasPrefix(config, "vmess://") {
 			proxyType = "vmess"
-		} else if strings.HasPrefix(processedNode, "trojan://") {
+		} else if strings.HasPrefix(config, "trojan://") {
 			proxyType = "trojan"
-		} else if strings.HasPrefix(processedNode, "http://") || strings.HasPrefix(processedNode, "https://") {
+		} else if strings.HasPrefix(config, "http://") || strings.HasPrefix(config, "https://") {
 			proxyType = "http"
-		} else if strings.HasPrefix(processedNode, "socks5://") {
+		} else if strings.HasPrefix(config, "socks5://") {
 			proxyType = "socks5"
 		} else {
 			return "", "", fmt.Errorf("不支持的代理类型")
@@ -200,7 +192,7 @@ func getLocationInfo(node string) (string, string, error) {
 	switch proxyType {
 	case "ss", "ssr", "vmess", "trojan":
 		// 这些协议需要完整的配置URL
-		proxyURL = processedNode
+		proxyURL = config
 	case "http", "https":
 		proxyURL = fmt.Sprintf("%s://%s", proxyType, serverAddr)
 	case "socks5":
