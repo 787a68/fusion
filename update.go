@@ -104,11 +104,12 @@ func fetchSubscription(url string) ([]string, error) {
 			lastErr = err
 			continue
 		}
-		
-		if resp.StatusCode != http.StatusOK {
+				if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("HTTP状态码错误: %d", resp.StatusCode)
 			continue
-		}		content := string(body)
+		}
+		
+		content := string(body)
 		// 提取[Proxy]部分，支持大小写
 		startIdx := -1
 		for _, header := range []string{"[Proxy]", "[proxy]", "[PROXY]"} {
