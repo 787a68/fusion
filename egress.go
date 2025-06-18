@@ -76,6 +76,12 @@ func getEgressInfo(node string) (*NodeInfo, error) {
 	var errChan = make(chan error, 3)
 	var doneChan = make(chan struct{})
 
+	// 设置超时控制
+	go func() {
+		time.Sleep(10 * time.Second)
+		close(doneChan)
+	}()
+
 	// 并行执行检测任务
 	wg.Add(3)
 

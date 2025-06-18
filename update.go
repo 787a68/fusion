@@ -22,7 +22,8 @@ func updateNodes() error {
 		return fmt.Errorf("未设置SUB环境变量")
 	}
 
-	// 拆分订阅链接	subList := strings.Split(subs, "||")
+	// 拆分订阅链接
+	subList := strings.Split(subs, "||")
 	if len(subList) == 0 {
 		return fmt.Errorf("SUB环境变量格式错误")
 	}
