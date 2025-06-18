@@ -19,17 +19,16 @@ jobs:
           go-version: 'stable'
           cache: true
       
-      - name: Verify Go code
+      - name: Ensure go.mod exists and tidy dependencies
         run: |
-          go mod init fusion
-          go mod tidy
-          go build -v ./...
-      
-      - name: Ensure go.sum is generated
-        run: |
-          if [ ! -f go.sum ]; then
-            go mod tidy
+          if [ ! -f go.mod ]; then
+            go mod init fusion
           fi
+          go mod tidy
+
+      - name: Build Go code
+        run: |
+          go build -v ./...
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

@@ -6,7 +6,6 @@ import (
 	"net"
 	"strings"
 	"time"
-	"./utils"
 )
 
 func processIngressNode(node string) (string, error) {
@@ -16,7 +15,7 @@ func processIngressNode(node string) (string, error) {
 	}
 
 	name, config := parts[0], parts[1]
-	params := utils.ParseParams(config)
+	params := parseParams(config)
 
 	// 判断代理类型
 	proxyType := getProxyType(config)
@@ -92,4 +91,19 @@ func addSNI(config string, server string) string {
 	parts := strings.Split(config, ",")
 	parts = append(parts, fmt.Sprintf("sni=%s", server))
 	return strings.Join(parts, ",")
+}
+
+func parseParams(config string) map[string]string {
+	params := make(map[string]string)
+	parts := strings.Split(config, ",")
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		keyVal := strings.SplitN(part, "=", 2)
+		if len(keyVal) == 2 {
+			params[strings.TrimSpace(keyVal[0])] = strings.TrimSpace(keyVal[1])
+		}
+	}
+
+	return params
 }
