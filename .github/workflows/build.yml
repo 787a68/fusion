@@ -9,74 +9,60 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
-          cache: true
-          cache-dependency-path: |
-            **/go.sum
-            **/go.mod
+          go-version: 'latest'
+          check-latest: true
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
 
       - name: Initialize Go module
         run: |
-          # 检查并初始化 go.mod
           if [ ! -f go.mod ]; then
-            go mod init fusion || exit 1
+            go mod init fusion
           fi
-          
-          # 检查并创建必要的目录
-          mkdir -p $GOPATH/pkg/mod || exit 1
-          mkdir -p $GOCACHE || exit 1
-          
-          # 清理并重新下载依赖
-          go clean -modcache || exit 1
-          go mod download -x || exit 1
-          go mod tidy || exit 1
-          
-          # 验证依赖
-          go mod verify || exit 1
-          
-          # 检查 go.sum
-          if [ ! -f go.sum ]; then
-            echo "Error: go.sum not generated"
-            exit 1
-          fi
-          
-          # 检查模块状态
-          go mod graph || exit 1
-          go list -m all || exit 1
+          go mod download
+          go mod tidy
 
-      - name: Build Go code
+      - name: Verify dependencies
         run: |
-          # 检查源代码
-          if [ ! -d "cmd" ] && [ ! -d "internal" ]; then
-            echo "Error: No source code found in cmd/ or internal/"
+          go mod verify
+          if [ ! -f go.sum ]; then
+            echo "::error::go.sum file not found"
             exit 1
           fi
-          
-          # 构建
-          go build -v ./... || exit 1
-          
-          # 运行测试
-          go test -v ./... || exit 1
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -v ./...
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        continue-on-error: false
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-        continue-on-error: false
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -88,4 +74,3 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             VERSION=${{ github.ref_name }}
-        continue-on-error: false
