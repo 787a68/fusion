@@ -26,28 +26,30 @@ type NodeInfo struct {
 }
 
 var (
+	// 节点计数器
 	nodeCounter = make(map[string]int)
 	counterMutex sync.Mutex
 
-	// 位置信息缓存
+	// 地理位置缓存
 	locationCache = make(map[string]struct {
 		ISOCode string
-		Flag    string
+		City    string
 		Time    time.Time
 	})
-	locationMutex sync.RWMutex
-	
+	locationCacheMutex sync.Mutex
+
 	// NAT类型缓存
 	natCache = make(map[string]struct {
 		NATType string
 		Time    time.Time
 	})
-	natMutex sync.RWMutex
+	natCacheMutex sync.Mutex
 
-	mihomoProcess *os.Process
-	mihomoPort    = 7890
-	mihomoMutex   sync.Mutex
-	mihomoStarted bool
+	// mihomo 相关
+	mihomoPort     = 7890
+	mihomoProcess  *os.Process
+	mihomoStarted  bool
+	mihomoMutex    sync.Mutex
 )
 
 const (
@@ -68,22 +70,22 @@ func init() {
 			now := time.Now()
 			
 			// 清理位置信息缓存
-			locationMutex.Lock()
+			locationCacheMutex.Lock()
 			for ip, info := range locationCache {
 				if now.Sub(info.Time) > 24*time.Hour {
 					delete(locationCache, ip)
 				}
 			}
-			locationMutex.Unlock()
+			locationCacheMutex.Unlock()
 			
 			// 清理NAT类型缓存
-			natMutex.Lock()
+			natCacheMutex.Lock()
 			for ip, info := range natCache {
 				if now.Sub(info.Time) > 6*time.Hour {
 					delete(natCache, ip)
 				}
 			}
-			natMutex.Unlock()
+			natCacheMutex.Unlock()
 		}
 	}()
 }
@@ -507,48 +509,50 @@ func getLocationFromIP(ip string) (string, error) {
 	locationCacheMutex.Lock()
 	if info, ok := locationCache[ip]; ok {
 		locationCacheMutex.Unlock()
-		return info.ISOCode + " " + info.City, nil
+		return info.Location, nil
 	}
 	locationCacheMutex.Unlock()
 
-	// 创建带超时的 HTTP 客户端
-	client := &http.Client{
-		Timeout: locationTimeout,
-	}
-
-	// 使用 ip-api.com 获取地理位置信息
-	resp, err := client.Get(fmt.Sprintf("http://ip-api.com/json/%s", ip))
+	// 使用 ip-api.com 获取位置信息
+	url := fmt.Sprintf("http://ip-api.com/json/%s", ip)
+	resp, err := http.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("请求 ip-api.com 失败: %v", err)
+		return "", fmt.Errorf("获取位置信息失败: %v", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("获取位置信息失败: HTTP %d", resp.StatusCode)
+	}
 
 	var result struct {
 		Country     string `json:"country"`
 		CountryCode string `json:"countryCode"`
-		Region      string `json:"region"`
 		City        string `json:"city"`
+		Status      string `json:"status"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("解析响应失败: %v", err)
+		return "", fmt.Errorf("解析位置信息失败: %v", err)
 	}
 
-	// 构建位置信息，使用 countryCode
+	if result.Status != "success" {
+		return "", fmt.Errorf("获取位置信息失败: %s", result.Status)
+	}
+
+	// 构建位置字符串
 	location := fmt.Sprintf("%s %s", result.CountryCode, result.City)
-	
+
 	// 缓存结果
 	locationCacheMutex.Lock()
 	locationCache[ip] = struct {
-		ISOCode string
-		City    string
-		Time    time.Time
+		Location string
+		Time     time.Time
 	}{
-		ISOCode: result.CountryCode,
-		City:    result.City,
-		Time:    time.Now(),
+		Location: location,
+		Time:     time.Now(),
 	}
 	locationCacheMutex.Unlock()
-	
+
 	return location, nil
 }
