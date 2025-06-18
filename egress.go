@@ -240,8 +240,8 @@ func getLocationInfo(node string) (string, string, error) {
 		return "", "", fmt.Errorf("无效的位置信息格式")
 	}
 
-	country := parts[0]
-	code := getCountryCode(country)
+	// 直接使用 countryCode
+	code := parts[0]
 	flag := getCountryFlag(code)
 
 	return code, flag, nil
@@ -487,11 +487,17 @@ func getLocationFromIP(ip string) (string, error) {
 		return "", fmt.Errorf("解析响应失败: %v", err)
 	}
 
-	// 构建位置信息
-	location := fmt.Sprintf("%s %s", result.Country, result.City)
+	// 构建位置信息，使用 countryCode
+	location := fmt.Sprintf("%s %s", result.CountryCode, result.City)
 	
 	// 缓存结果
 	locationCache.Store(ip, location)
 	
 	return location, nil
+}
+
+// 获取国家代码
+func getCountryCode(country string) string {
+	// 直接返回传入的国家代码，因为 ip-api.com 已经返回了标准的 ISO 代码
+	return country
 }
