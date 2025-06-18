@@ -9,30 +9,45 @@ import (
 )
 
 func processIngressNode(node string) (string, error) {
+	// 移除可能的 BOM 标记
+	node = strings.TrimSpace(node)
+	
+	// 处理节点格式
 	parts := strings.SplitN(node, "=", 2)
 	if len(parts) != 2 {
-		return "", fmt.Errorf("无效的节点格式")
+		return "", fmt.Errorf("无效的节点格式: %s", node)
 	}
 
 	name, config := parts[0], parts[1]
+	
+	// 清理名称中的特殊字符
+	name = strings.TrimSpace(name)
+	name = strings.Trim(name, "[]")
+	
+	// 解析配置参数
 	params := parseIngressParams(config)
 
 	// 判断代理类型
 	proxyType := getProxyType(config)
 	if proxyType == "" {
-		return node, nil
+		return "", fmt.Errorf("不支持的代理类型: %s", config)
 	}
 
 	// 获取服务器地址
 	server := params["server"]
 	if server == "" {
-		return node, nil
+		return "", fmt.Errorf("未找到服务器地址")
 	}
 
 	// 检查是否为IP地址
 	if net.ParseIP(server) != nil {
-		return node, nil
+		// 如果是IP地址，直接返回处理后的节点
+		if params["sni"] == "" {
+			config = addSNI(config, server)
+		}
+		return fmt.Sprintf("%s = %s", name, config), nil
 	}
+
 	// 执行DNS查询（带超时控制）
 	resolver := &net.Resolver{
 		PreferGo: true,

@@ -325,11 +325,21 @@ func parseParams(config string) map[string]string {
 	params := make(map[string]string)
 	parts := strings.Split(config, ",")
 
+	// 处理协议、服务器和端口
+	if len(parts) >= 3 {
+		params["type"] = strings.TrimSpace(parts[0])    // 协议类型
+		params["server"] = strings.TrimSpace(parts[1])  // 服务器地址
+		params["port"] = strings.TrimSpace(parts[2])    // 端口
+	}
+
+	// 处理其他参数
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		keyVal := strings.SplitN(part, "=", 2)
 		if len(keyVal) == 2 {
-			params[strings.TrimSpace(keyVal[0])] = strings.TrimSpace(keyVal[1])
+			key := strings.TrimSpace(keyVal[0])
+			value := strings.TrimSpace(keyVal[1])
+			params[key] = value
 		}
 	}
 

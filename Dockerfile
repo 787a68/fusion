@@ -13,8 +13,7 @@ COPY . .
 ARG VERSION=dev
 
 # 初始化Go模块并编译
-RUN echo "Building version: ${VERSION}" && \
-    go mod tidy && \
+RUN go mod tidy && \
     CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.Version=${VERSION}" -o fusion .
 
 # 最终镜像
