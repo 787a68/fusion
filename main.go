@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -12,6 +13,11 @@ import (
 	"syscall"
 	"sync"
 	"time"
+)
+
+const (
+	checkInterval = 2 * time.Hour    // 检查间隔时间
+	updateInterval = 24 * time.Hour  // 更新间隔时间
 )
 
 var (
@@ -68,8 +74,11 @@ func setupLogger() {
 		log.Fatalf("打开日志文件失败: %v", err)
 	}
 
+	// 创建多输出写入器
+	multiWriter := io.MultiWriter(os.Stdout, f)
+
 	// 设置日志输出
-	log.SetOutput(f)
+	log.SetOutput(multiWriter)
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	log.Printf("Fusion v%s 启动，TOKEN: %s", Version, TOKEN)
 }
@@ -137,20 +146,26 @@ func checkNodeConfig() {
 		nodePath := filepath.Join(fusionDir, "node.conf")
 		info, err := os.Stat(nodePath)
 		
-		if err == nil {
+		if err != nil {
+			if os.IsNotExist(err) {
+				log.Println("node.conf 不存在，执行更新")
+				if err := updateNodes(); err != nil {
+					log.Printf("更新节点失败: %v", err)
+				}
+			} else {
+				log.Printf("检查 node.conf 失败: %v", err)
+			}
+		} else {
 			// 检查文件是否超过24小时
-			if time.Since(info.ModTime()) > 24*time.Hour {
+			if time.Since(info.ModTime()) > updateInterval {
 				log.Println("node.conf 超过24小时，执行更新")
 				if err := updateNodes(); err != nil {
 					log.Printf("更新节点失败: %v", err)
 				}
 			}
-		} else if !os.IsNotExist(err) {
-			// 只有在文件存在但无法访问时才记录错误
-			log.Printf("检查 node.conf 失败: %v", err)
 		}
 
-		time.Sleep(2 * time.Hour)
+		time.Sleep(checkInterval)
 	}
 }
 
