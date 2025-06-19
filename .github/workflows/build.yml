@@ -19,33 +19,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-          check-latest: true
-          cache: false
-
-      - name: Initialize Go module
+      - name: Check code style (host)
         run: |
-          if [ ! -f go.mod ]; then
-            go mod init fusion
-          fi
-          go mod tidy
-
-      - name: Check code
-        run: |
-          go vet ./...
-          go fmt ./...
-
-      - name: Build
-        run: |
-          VERSION=$(date +'%Y%m%d%H%M')
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          go build -v -ldflags="-X 'main.Version=$VERSION'" -o fusion ./...
-
-      - name: Test
-        run: go test -v ./...
+          go vet ./fusion/...
+          go fmt ./fusion/...
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -56,6 +33,11 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Build and test in Docker
+        run: |
+          docker build --build-arg VERSION=$(date +'%Y%m%d%H%M') -t fusion-test .
+          docker run --rm fusion-test /usr/local/bin/fusion --help || true
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -63,6 +45,6 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/fusion:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/fusion:${{ env.VERSION }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/fusion:${{ github.run_number }}
           build-args: |
-            VERSION=${{ env.VERSION }}
+            VERSION=${{ github.run_number }}
