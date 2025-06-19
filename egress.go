@@ -224,8 +224,21 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 
 // CreateAdapterClient 用 adapter 机制生成独立代理 client
 func CreateAdapterClient(meta map[string]any) *ProxyClient {
-	// 只转换明确为 bool 的参数
-	boolKeys := []string{"tfo", "udp-relay", "tls", "skip-cert-verify", "allow-lan", "sni-proxy"}
+	// 1. 字段名自动映射，适配 mihomo/ss/clash
+	if method, ok := meta["method"]; ok {
+		meta["cipher"] = method
+	}
+	if udpRelay, ok := meta["udp-relay"]; ok {
+		meta["udp"] = udpRelay
+	}
+	if tfo, ok := meta["tfo"]; ok {
+		meta["tcp-fast-open"] = tfo
+	}
+	// 其他可扩展字段名映射
+	// 如有更多字段差异，可在此补充
+
+	// 2. 布尔值类型转换（包括映射出来的新字段）
+	boolKeys := []string{"tfo", "udp-relay", "tls", "skip-cert-verify", "allow-lan", "sni-proxy", "udp", "tcp-fast-open"}
 	for _, key := range boolKeys {
 		if v, ok := meta[key]; ok {
 			if s, ok := v.(string); ok {
