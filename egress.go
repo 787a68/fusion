@@ -88,91 +88,6 @@ func init() {
 	}()
 }
 
-func getEgressInfo(node string) (*NodeInfo, error) {
-	// 构建走 mihomo 端口的代理 http.Client
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mihomoPort))
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-		Timeout: totalTimeout,
-	}
-
-	var info NodeInfo
-	var errChan = make(chan error, 1)
-	var doneChan = make(chan struct{})
-	var once sync.Once
-
-	// 设置总超时控制
-	go func() {
-		time.Sleep(totalTimeout)
-		once.Do(func() {
-			close(doneChan)
-		})
-	}()
-
-	// 1. 先执行地理位置检测
-	iso, flag, err := getLocationInfo(client)
-	if err != nil {
-		return nil, fmt.Errorf("地理位置测试失败: %v", err)
-	}
-	info.ISOCode = iso
-	info.Flag = flag
-
-	// 如果不是香港节点，直接返回结果
-	if info.ISOCode != "HK" {
-		counterMutex.Lock()
-		nodeCounter[info.ISOCode]++
-		info.Count = nodeCounter[info.ISOCode]
-		counterMutex.Unlock()
-		return &info, nil
-	}
-
-	// 2. 对于香港节点，仅检测 NAT 类型
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		natType, err := getNATType(client)
-		if err != nil {
-			select {
-			case errChan <- fmt.Errorf("获取NAT类型失败: %v", err):
-			case <-doneChan:
-			}
-			return
-		}
-		info.NATType = natType
-	}()
-
-	go func() {
-		wg.Wait()
-		once.Do(func() {
-			close(doneChan)
-		})
-	}()
-
-	select {
-	case <-doneChan:
-		counterMutex.Lock()
-		nodeCounter[info.ISOCode]++
-		info.Count = nodeCounter[info.ISOCode]
-		counterMutex.Unlock()
-		return &info, nil
-	case err := <-errChan:
-		return nil, err
-	case <-time.After(totalTimeout):
-		return nil, fmt.Errorf("获取节点信息超时")
-	}
-}
-
 // 通过代理 client 获取地理位置（subs-check 方式）
 func getLocationInfo(client *http.Client) (string, string, error) {
 	resp, err := client.Get("https://www.cloudflare.com/cdn-cgi/trace")
@@ -273,43 +188,6 @@ func isPortOpen(port int) bool {
 	return true
 }
 
-// DetectNodes 并发检测所有节点的 GEO 和 NAT 类型
-func DetectNodes(nodes []string, maxConcurrent int) []*NodeInfo {
-	var wg sync.WaitGroup
-	results := make([]*NodeInfo, len(nodes))
-	tasks := make(chan struct{
-		idx int
-		node string
-	}, len(nodes))
-
-	// 启动 worker
-	for i := 0; i < maxConcurrent; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for task := range tasks {
-				info, err := getEgressInfo(task.node)
-				if err == nil {
-					results[task.idx] = info
-				} else {
-					results[task.idx] = nil // 或可记录错误
-				}
-			}
-		}()
-	}
-
-	// 分发任务
-	for idx, node := range nodes {
-		tasks <- struct{
-			idx int
-			node string
-		}{idx, node}
-	}
-	close(tasks)
-	wg.Wait()
-	return results
-}
-
 // adapter 机制：每节点独立 client 检测
 func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 	// 1. 生成独立代理 client
@@ -394,4 +272,23 @@ func (pc *ProxyClient) Close() {
 		pc.proxy.Close()
 	}
 	pc.Client = nil
+}
+
+// 通过 Cloudflare trace API 获取出口国家代码，失败返回 "Unknown"
+func getCountryCode(_ string) string {
+	resp, err := http.Get("https://www.cloudflare.com/cdn-cgi/trace")
+	if err != nil {
+		return "Unknown"
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, "loc=") {
+			loc := strings.TrimPrefix(line, "loc=")
+			if len(loc) == 2 {
+				return strings.ToUpper(loc)
+			}
+		}
+	}
+	return "Unknown"
 }
