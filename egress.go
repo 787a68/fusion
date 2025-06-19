@@ -201,6 +201,8 @@ func adaptForMihomo(surgeMap map[string]string) map[string]any {
 			adapted["udp"] = parseBoolString(v)
 		case "tcp-fast-open":
 			adapted["tcp-fast-open"] = parseBoolString(v)
+		case "skip-cert-verify":
+			adapted["skip-cert-verify"] = parseBoolString(v)
 		default:
 			adapted[k] = v
 		}
