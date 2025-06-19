@@ -16,6 +16,8 @@ func processIngressNode(node string) ([]map[string]any, error) {
 	}
 	name, config := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	params, order := parseParams(config)
+	params["name"] = name
+	order = append([]string{"name"}, order...)
 	proxyType := getProxyType(config)
 	if proxyType == "" {
 		return nil, fmt.Errorf("不支持的代理类型: %s", config)
