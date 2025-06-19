@@ -6,13 +6,13 @@ RUN apk add --no-cache git gcc musl-dev
 # 设置工作目录
 WORKDIR /app
 
-# 先复制 go.mod/go.sum 以便缓存依赖
-COPY go.mod go.sum ./
+# 兼容无 go.sum，适配最新 Docker 版本
+COPY go.mod go.sum* ./
 
 # 利用 buildx 缓存加速 go mod download
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go mod download
+    go mod download || go mod tidy
 
 # 再复制全部源码
 COPY . .

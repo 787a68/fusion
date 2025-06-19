@@ -314,14 +314,62 @@ func formatBoolParams(params map[string]string) {
 	}
 }
 
-// 按参数顺序输出节点行，保证顺序与上游一致
-// 仅用于最终导出/写入文件，其他流程请勿直接调用
+// 按协议类型输出原生 Surge 节点格式，支持多协议
 func buildSurgeLine(params map[string]string, order []string) string {
-	var parts []string
+	typeStr := params["type"]
+	server := params["server"]
+	port := params["port"]
+	var mainParts []string
+	var extraParts []string
+
+	switch typeStr {
+	case "ss":
+		mainParts = []string{"ss", server, port}
+		if v, ok := params["encrypt-method"]; ok && v != "" {
+			extraParts = append(extraParts, "encrypt-method="+v)
+		}
+		if v, ok := params["password"]; ok && v != "" {
+			extraParts = append(extraParts, "password="+v)
+		}
+	case "trojan":
+		mainParts = []string{"trojan", server, port}
+		if v, ok := params["password"]; ok && v != "" {
+			extraParts = append(extraParts, "password="+v)
+		}
+		if v, ok := params["sni"]; ok && v != "" {
+			extraParts = append(extraParts, "sni="+v)
+		}
+	case "vmess":
+		mainParts = []string{"vmess", server, port}
+		if v, ok := params["username"]; ok && v != "" {
+			extraParts = append(extraParts, "username="+v)
+		}
+		for _, k := range []string{"ws", "ws-path", "ws-headers", "tls", "sni", "skip-cert-verify"} {
+			if v, ok := params[k]; ok && v != "" {
+				extraParts = append(extraParts, k+"="+v)
+			}
+		}
+	default:
+		mainParts = []string{typeStr, server, port}
+	}
+
+	exist := map[string]struct{}{"type":{}, "server":{}, "port":{}}
+	for _, k := range []string{"encrypt-method", "password", "sni", "username", "ws", "ws-path", "ws-headers", "tls", "skip-cert-verify"} {
+		exist[k] = struct{}{}
+	}
 	for _, key := range order {
+		if _, skip := exist[key]; skip {
+			continue
+		}
 		if val, ok := params[key]; ok && val != "" {
-			parts = append(parts, key+"="+val)
+			extraParts = append(extraParts, key+"="+val)
 		}
 	}
-	return strings.Join(parts, ", ")
+
+	mainStr := strings.Join(mainParts, ",") // 主参数间无空格
+	extraStr := strings.Join(extraParts, ",")
+	if extraStr != "" {
+		return mainStr + ", " + extraStr // 参数部分前有逗号+空格
+	}
+	return mainStr
 }
