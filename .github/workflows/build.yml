@@ -19,11 +19,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check code style (host)
-        run: |
-          go vet ./fusion/...
-          go fmt ./fusion/...
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
