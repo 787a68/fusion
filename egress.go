@@ -194,14 +194,22 @@ func adaptForMihomo(surgeMap map[string]string) map[string]any {
 		case "encrypt-method":
 			adapted["cipher"] = v
 		case "tfo":
-			adapted["tcp-fast-open"] = v
+			adapted["tcp-fast-open"] = parseBoolString(v)
 		case "udp-relay":
-			adapted["udp"] = v
+			adapted["udp"] = parseBoolString(v)
+		case "udp":
+			adapted["udp"] = parseBoolString(v)
+		case "tcp-fast-open":
+			adapted["tcp-fast-open"] = parseBoolString(v)
 		default:
 			adapted[k] = v
 		}
 	}
 	return adapted
+}
+
+func parseBoolString(s string) bool {
+	return s == "true" || s == "1"
 }
 
 // 检查端口是否开放

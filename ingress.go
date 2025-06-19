@@ -62,7 +62,14 @@ func processIngressNode(node string) ([]map[string]any, error) {
 		for k, v := range nodeMap {
 			m[k] = v
 		}
+		// 深拷贝 params 并替换 server
+		newParams := make(map[string]string)
+		for k, v := range params {
+			newParams[k] = v
+		}
+		newParams["server"] = ip
 		m["server"] = ip
+		m["_params"] = newParams
 		result = append(result, m)
 	}
 	return result, nil
