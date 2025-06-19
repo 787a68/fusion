@@ -15,7 +15,7 @@ func processIngressNode(node string) ([]map[string]any, error) {
 		return nil, fmt.Errorf("无效的节点格式: %s", node)
 	}
 	name, config := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-	params := parseIngressParams(config)
+	params, order := parseParams(config)
 	proxyType := getProxyType(config)
 	if proxyType == "" {
 		return nil, fmt.Errorf("不支持的代理类型: %s", config)
@@ -31,6 +31,8 @@ func processIngressNode(node string) ([]map[string]any, error) {
 	for k, v := range params {
 		nodeMap[k] = v
 	}
+	nodeMap["_params"] = params
+	nodeMap["_order"] = order
 
 	// DNS 查询
 	if net.ParseIP(server) != nil {

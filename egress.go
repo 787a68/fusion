@@ -22,6 +22,8 @@ type NodeInfo struct {
 	NATType    string
 	Count      int
 	Meta       map[string]any
+	Params     map[string]string // 原始参数map
+	Order      []string          // 参数顺序
 }
 
 var (
@@ -149,18 +151,20 @@ func getCountryFlag(code string) string {
 	return string(0x1F1E6+rune(code[0]-'A')) + string(0x1F1E6+rune(code[1]-'A'))
 }
 
-func parseParams(config string) map[string]string {
+// 解析节点参数，返回参数 map 和参数顺序 slice
+func parseParams(config string) (map[string]string, []string) {
 	params := make(map[string]string)
+	var order []string
 	parts := strings.Split(config, ",")
 
-	// 处理协议、服务器和端口
 	if len(parts) >= 3 {
-		params["type"] = strings.TrimSpace(parts[0])    // 协议类型
-		params["server"] = strings.TrimSpace(parts[1])  // 服务器地址
-		params["port"] = strings.TrimSpace(parts[2])    // 端口
+		keys := []string{"type", "server", "port"}
+		for i, k := range keys {
+			params[k] = strings.TrimSpace(parts[i])
+			order = append(order, k)
+		}
 	}
 
-	// 处理其他参数
 	for i := 3; i < len(parts); i++ {
 		part := strings.TrimSpace(parts[i])
 		keyVal := strings.SplitN(part, "=", 2)
@@ -168,10 +172,40 @@ func parseParams(config string) map[string]string {
 			key := strings.TrimSpace(keyVal[0])
 			value := strings.TrimSpace(keyVal[1])
 			params[key] = value
+			order = append(order, key)
 		}
 	}
 
-	return params
+	// 只做必要字段校验
+	if typ, ok := params["type"]; ok && typ == "ss" {
+		if _, ok := params["encrypt-method"]; !ok || params["encrypt-method"] == "" {
+			log.Printf("SS 节点缺少加密方式字段: %+v", params)
+		}
+	}
+
+	return params, order
+}
+
+// 将参数 map 中所有布尔值转换为 "1"/"0" 字符串
+func formatBoolParams(params map[string]string) {
+	for k, v := range params {
+		if v == "true" {
+			params[k] = "1"
+		} else if v == "false" {
+			params[k] = "0"
+		}
+	}
+}
+
+// 按参数顺序输出节点行，保证顺序与上游一致
+func buildSurgeLine(params map[string]string, order []string) string {
+	var parts []string
+	for _, key := range order {
+		if val, ok := params[key]; ok && val != "" {
+			parts = append(parts, key+"="+val)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // 检查端口是否开放
@@ -225,8 +259,10 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 // CreateAdapterClient 用 adapter 机制生成独立代理 client
 func CreateAdapterClient(meta map[string]any) *ProxyClient {
 	// 1. 字段名自动映射，适配 mihomo/ss/clash
-	if method, ok := meta["method"]; ok {
-		meta["cipher"] = method
+	if typ, ok := meta["type"]; ok && typ == "ss" {
+		if method, ok := meta["method"]; ok && method != "" {
+			meta["cipher"] = method
+		}
 	}
 	if udpRelay, ok := meta["udp-relay"]; ok {
 		meta["udp"] = udpRelay
@@ -313,4 +349,22 @@ func getCountryCode(_ string) string {
 		}
 	}
 	return "Unknown"
+}
+
+// 适配 Mihomo/Clash 格式的 map，不污染原 map
+func adaptForMihomo(surgeMap map[string]string) map[string]any {
+	adapted := make(map[string]any)
+	for k, v := range surgeMap {
+		switch k {
+		case "encrypt-method":
+			adapted["cipher"] = v
+		case "tfo":
+			adapted["tcp-fast-open"] = v
+		case "udp-relay":
+			adapted["udp"] = v
+		default:
+			adapted[k] = v
+		}
+	}
+	return adapted
 }

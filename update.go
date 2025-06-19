@@ -38,7 +38,14 @@ func updateNodes() error {
 			continue // 跳过检测失败或不符合筛选条件
 		}
 		name := RenameNode(info.Meta, info)
-		line := mapToSurgeLine(info.Meta, name)
+		// 从 Meta 取出 _params 和 _order
+		params, ok1 := info.Meta["_params"].(map[string]string)
+		order, ok2 := info.Meta["_order"].([]string)
+		if !ok1 || !ok2 {
+			log.Printf("节点参数顺序信息缺失，跳过: %+v", info.Meta)
+			continue
+		}
+		line := fmt.Sprintf("%s = %s", name, buildSurgeLine(params, order))
 		outputLines = append(outputLines, line)
 	}
 
