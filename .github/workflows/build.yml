@@ -31,7 +31,6 @@ jobs:
           if [ ! -f go.mod ]; then
             go mod init fusion
           fi
-          go mod download
           go mod tidy
 
       - name: Check code
