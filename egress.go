@@ -190,20 +190,12 @@ func parseParams(config string) (map[string]string, []string) {
 func adaptForMihomo(surgeMap map[string]string) map[string]any {
 	adapted := make(map[string]any)
 	for k, v := range surgeMap {
-		switch k {
-		case "encrypt-method":
+		// 自动识别所有布尔值
+		if v == "true" || v == "false" || v == "1" || v == "0" {
+			adapted[k] = parseBoolString(v)
+		} else if k == "encrypt-method" {
 			adapted["cipher"] = v
-		case "tfo":
-			adapted["tcp-fast-open"] = parseBoolString(v)
-		case "udp-relay":
-			adapted["udp"] = parseBoolString(v)
-		case "udp":
-			adapted["udp"] = parseBoolString(v)
-		case "tcp-fast-open":
-			adapted["tcp-fast-open"] = parseBoolString(v)
-		case "skip-cert-verify":
-			adapted["skip-cert-verify"] = parseBoolString(v)
-		default:
+		} else {
 			adapted[k] = v
 		}
 	}
