@@ -45,6 +45,7 @@ func updateNodes() error {
 			log.Printf("节点参数顺序信息缺失，跳过: %+v", info.Meta)
 			continue
 		}
+		formatBoolParams(params)
 		line := fmt.Sprintf("%s = %s", name, buildSurgeLine(params, order))
 		outputLines = append(outputLines, line)
 	}
@@ -299,4 +300,28 @@ func FetchAndParseNodes() ([]map[string]any, error) {
 		}
 	}
 	return allNodeMaps, nil
+}
+
+// 将参数 map 中所有布尔值转换为 "1"/"0" 字符串
+// 注意：本函数只允许在最终生成文件前调用，其他任何流程禁止调用布尔值转换！
+func formatBoolParams(params map[string]string) {
+	for k, v := range params {
+		if v == "true" {
+			params[k] = "1"
+		} else if v == "false" {
+			params[k] = "0"
+		}
+	}
+}
+
+// 按参数顺序输出节点行，保证顺序与上游一致
+// 仅用于最终导出/写入文件，其他流程请勿直接调用
+func buildSurgeLine(params map[string]string, order []string) string {
+	var parts []string
+	for _, key := range order {
+		if val, ok := params[key]; ok && val != "" {
+			parts = append(parts, key+"="+val)
+		}
+	}
+	return strings.Join(parts, ", ")
 }

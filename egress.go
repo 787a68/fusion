@@ -186,26 +186,22 @@ func parseParams(config string) (map[string]string, []string) {
 	return params, order
 }
 
-// 将参数 map 中所有布尔值转换为 "1"/"0" 字符串
-func formatBoolParams(params map[string]string) {
-	for k, v := range params {
-		if v == "true" {
-			params[k] = "1"
-		} else if v == "false" {
-			params[k] = "0"
+// 适配 Mihomo/Clash 格式的 map，不污染原 map
+func adaptForMihomo(surgeMap map[string]string) map[string]any {
+	adapted := make(map[string]any)
+	for k, v := range surgeMap {
+		switch k {
+		case "encrypt-method":
+			adapted["cipher"] = v
+		case "tfo":
+			adapted["tcp-fast-open"] = v
+		case "udp-relay":
+			adapted["udp"] = v
+		default:
+			adapted[k] = v
 		}
 	}
-}
-
-// 按参数顺序输出节点行，保证顺序与上游一致
-func buildSurgeLine(params map[string]string, order []string) string {
-	var parts []string
-	for _, key := range order {
-		if val, ok := params[key]; ok && val != "" {
-			parts = append(parts, key+"="+val)
-		}
-	}
-	return strings.Join(parts, ", ")
+	return adapted
 }
 
 // 检查端口是否开放
@@ -220,10 +216,13 @@ func isPortOpen(port int) bool {
 
 // adapter 机制：每节点独立 client 检测
 func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
+	// 取出原始参数并适配 Mihomo/Clash
+	params, _ := meta["_params"].(map[string]string)
+	mihomoMeta := adaptForMihomo(params)
 	// 1. 生成独立代理 client
-	client := CreateAdapterClient(meta)
+	client := CreateAdapterClient(mihomoMeta)
 	if client == nil {
-		log.Printf("getEgressInfoAdapter adapter client 创建失败")
+		log.Printf("getEgressInfoAdapter adapter client 创建失败, meta: %+v", meta)
 		return nil, fmt.Errorf("adapter client 创建失败")
 	}
 	defer client.Close()
@@ -231,7 +230,7 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 	// 2. GEO 检测
 	iso, flag, err := getLocationInfo(client.Client)
 	if err != nil {
-		log.Printf("getEgressInfoAdapter 地理位置测试失败: %v", err)
+		log.Printf("getEgressInfoAdapter 地理位置测试失败: %v, meta: %+v", err, meta)
 		return nil, fmt.Errorf("地理位置测试失败: %v", err)
 	}
 
@@ -258,38 +257,10 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 
 // CreateAdapterClient 用 adapter 机制生成独立代理 client
 func CreateAdapterClient(meta map[string]any) *ProxyClient {
-	// 1. 字段名自动映射，适配 mihomo/ss/clash
-	if typ, ok := meta["type"]; ok && typ == "ss" {
-		if method, ok := meta["method"]; ok && method != "" {
-			meta["cipher"] = method
-		}
-	}
-	if udpRelay, ok := meta["udp-relay"]; ok {
-		meta["udp"] = udpRelay
-	}
-	if tfo, ok := meta["tfo"]; ok {
-		meta["tcp-fast-open"] = tfo
-	}
-	// 其他可扩展字段名映射
-	// 如有更多字段差异，可在此补充
-
-	// 2. 布尔值类型转换（包括映射出来的新字段）
-	boolKeys := []string{"tfo", "udp-relay", "tls", "skip-cert-verify", "allow-lan", "sni-proxy", "udp", "tcp-fast-open"}
-	for _, key := range boolKeys {
-		if v, ok := meta[key]; ok {
-			if s, ok := v.(string); ok {
-				if s == "true" {
-					meta[key] = true
-				} else if s == "false" {
-					meta[key] = false
-				}
-			}
-		}
-	}
 	// 依赖 mihomo adapter/constant
 	proxy, err := adapter.ParseProxy(meta)
 	if err != nil {
-		log.Printf("CreateAdapterClient adapter.ParseProxy 失败: %v", err)
+		log.Printf("CreateAdapterClient adapter.ParseProxy 失败: %v, meta: %+v", err, meta)
 		return nil
 	}
 	transport := &http.Transport{
@@ -349,22 +320,4 @@ func getCountryCode(_ string) string {
 		}
 	}
 	return "Unknown"
-}
-
-// 适配 Mihomo/Clash 格式的 map，不污染原 map
-func adaptForMihomo(surgeMap map[string]string) map[string]any {
-	adapted := make(map[string]any)
-	for k, v := range surgeMap {
-		switch k {
-		case "encrypt-method":
-			adapted["cipher"] = v
-		case "tfo":
-			adapted["tcp-fast-open"] = v
-		case "udp-relay":
-			adapted["udp"] = v
-		default:
-			adapted[k] = v
-		}
-	}
-	return adapted
 }
