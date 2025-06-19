@@ -19,10 +19,12 @@ func updateNodes() error {
 	// 1. 拉取并解析所有节点
 	allNodes, err := FetchAndParseNodes()
 	if err != nil {
+		log.Printf("updateNodes 节点拉取/解析失败: %v", err)
 		return fmt.Errorf("节点拉取/解析失败: %v", err)
 	}
 
 	if len(allNodes) == 0 {
+		log.Printf("updateNodes 没有成功处理任何节点")
 		return fmt.Errorf("没有成功处理任何节点")
 	}
 
@@ -42,6 +44,7 @@ func updateNodes() error {
 
 	content := strings.Join(outputLines, "\n")
 	if strings.TrimSpace(content) == "" {
+		log.Printf("updateNodes 生成的节点配置为空")
 		return fmt.Errorf("生成的节点配置为空")
 	}
 
@@ -62,12 +65,14 @@ func fetchSubscription(url string) ([]string, error) {
 
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
+			log.Printf("fetchSubscription 创建请求失败: %v", err)
 			return nil, err
 		}
 
 		req.Header.Set("User-Agent", "Surge")
 		resp, err := client.Do(req)
 		if err != nil {
+			log.Printf("fetchSubscription 读取响应失败: %v", err)
 			lastErr = err
 			continue
 		}
@@ -76,10 +81,12 @@ func fetchSubscription(url string) ([]string, error) {
 		// 限制响应大小为10MB
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 		if err != nil {
+			log.Printf("fetchSubscription 读取响应失败: %v", err)
 			lastErr = err
 			continue
 		}
 				if resp.StatusCode != http.StatusOK {
+			log.Printf("fetchSubscription HTTP状态码错误: %d", resp.StatusCode)
 			lastErr = fmt.Errorf("HTTP状态码错误: %d", resp.StatusCode)
 			continue
 		}
@@ -94,6 +101,7 @@ func fetchSubscription(url string) ([]string, error) {
 			}
 		}
 		if startIdx == -1 {
+			log.Printf("fetchSubscription 未找到[Proxy]部分")
 			return nil, fmt.Errorf("未找到[Proxy]部分")
 		}
 
@@ -109,6 +117,7 @@ func fetchSubscription(url string) ([]string, error) {
 
 		// 确保切片范围有效
 		if startIdx >= endIdx {
+			log.Printf("fetchSubscription 无效的配置格式：无法找到有效的节点部分")
 			return nil, fmt.Errorf("无效的配置格式：无法找到有效的节点部分")
 		}
 
@@ -129,9 +138,13 @@ func fetchSubscription(url string) ([]string, error) {
 
 		// 确保至少有一个有效节点
 		if len(nodes) == 0 {
+			log.Printf("fetchSubscription 未找到有效的节点配置")
 			return nil, fmt.Errorf("未找到有效的节点配置")
 		}
 
+		if lastErr != nil {
+			log.Printf("fetchSubscription 最终失败: %v", lastErr)
+		}
 		return nodes, nil
 	}
 	return nil, lastErr

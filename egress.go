@@ -1,26 +1,19 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Dreamacro/clash/adapter/outbound"
-	"github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/tunnel"
-	"github.com/Dreamacro/clash/adapter"
+	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/constant"
 )
 
 type NodeInfo struct {
@@ -88,10 +81,11 @@ func init() {
 	}()
 }
 
-// 通过代理 client 获取地理位置（subs-check 方式）
+// 通过代理 client 获取地理位置（mihomo subs-check 方式）
 func getLocationInfo(client *http.Client) (string, string, error) {
 	resp, err := client.Get("https://www.cloudflare.com/cdn-cgi/trace")
 	if err != nil {
+		log.Printf("getLocationInfo 获取地理信息失败: %v", err)
 		return "", "", fmt.Errorf("获取地理信息失败: %v", err)
 	}
 	defer resp.Body.Close()
@@ -106,6 +100,7 @@ func getLocationInfo(client *http.Client) (string, string, error) {
 		}
 	}
 	if loc == "" || ip == "" {
+		log.Printf("getLocationInfo 未能获取地理信息")
 		return "", "", fmt.Errorf("未能获取地理信息")
 	}
 	flag := getCountryFlag(loc)
@@ -124,6 +119,7 @@ func getNATType(client *http.Client) (string, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("getNATType 执行 STUN 检测失败: %v", err)
 		return "Unknown", fmt.Errorf("执行 STUN 检测失败: %v", err)
 	}
 	defer resp.Body.Close()
@@ -193,6 +189,7 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 	// 1. 生成独立代理 client
 	client := CreateAdapterClient(meta)
 	if client == nil {
+		log.Printf("getEgressInfoAdapter adapter client 创建失败")
 		return nil, fmt.Errorf("adapter client 创建失败")
 	}
 	defer client.Close()
@@ -200,6 +197,7 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 	// 2. GEO 检测
 	iso, flag, err := getLocationInfo(client.Client)
 	if err != nil {
+		log.Printf("getEgressInfoAdapter 地理位置测试失败: %v", err)
 		return nil, fmt.Errorf("地理位置测试失败: %v", err)
 	}
 
@@ -226,9 +224,10 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 
 // CreateAdapterClient 用 adapter 机制生成独立代理 client
 func CreateAdapterClient(meta map[string]any) *ProxyClient {
-	// 依赖 subs-check adapter/constant
+	// 依赖 mihomo adapter/constant
 	proxy, err := adapter.ParseProxy(meta)
 	if err != nil {
+		log.Printf("CreateAdapterClient adapter.ParseProxy 失败: %v", err)
 		return nil
 	}
 	transport := &http.Transport{
@@ -267,9 +266,6 @@ type ProxyClient struct {
 func (pc *ProxyClient) Close() {
 	if pc.Client != nil {
 		pc.Client.CloseIdleConnections()
-	}
-	if pc.proxy != nil {
-		pc.proxy.Close()
 	}
 	pc.Client = nil
 }
