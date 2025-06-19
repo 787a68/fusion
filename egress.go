@@ -1,4 +1,4 @@
-package fusion
+package main
 
 import (
 	"bytes"
