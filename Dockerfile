@@ -6,23 +6,15 @@ RUN apk add --no-cache git gcc musl-dev
 # 设置工作目录
 WORKDIR /app
 
-# 兼容无 go.sum，适配最新 Docker 版本
-COPY go.mod go.sum* ./
-
-# 利用 buildx 缓存加速 go mod download
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    go mod download || go mod tidy
-
-# 再复制全部源码
+# 复制源代码
 COPY . .
 
 # 接收版本参数
 ARG VERSION=dev
 
-# 编译时继续挂载缓存
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+# 初始化Go模块并编译
+RUN go mod init fusion && \
+    go mod tidy && \
     CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.Version=${VERSION}" -o fusion .
 
 # 最终镜像
