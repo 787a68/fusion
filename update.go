@@ -16,94 +16,35 @@ func updateNodes() error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// 获取订阅链接
-	subs := strings.TrimSpace(os.Getenv("SUB"))
-	if subs == "" {
-		return fmt.Errorf("未设置SUB环境变量")
+	// 1. 拉取并解析所有节点
+	allNodes, err := FetchAndParseNodes()
+	if err != nil {
+		return fmt.Errorf("节点拉取/解析失败: %v", err)
 	}
 
-	// 拆分订阅链接
-	subList := strings.Split(subs, "||")
-	if len(subList) == 0 {
-		return fmt.Errorf("SUB环境变量格式错误")
-	}
-	
-	nodes := make(map[string][]string)
-	var nodesMutex sync.Mutex
-
-	// 并行获取节点
-	var wg sync.WaitGroup
-	for _, sub := range subList {
-		// 处理订阅链接格式
-		var name, url string
-		if strings.Contains(sub, "=") {
-			parts := strings.SplitN(sub, "=", 2)
-			if len(parts) != 2 {
-				log.Printf("无效的订阅格式: %s", sub)
-				continue
-			}
-			name, url = parts[0], parts[1]
-		} else {
-			// 如果没有指定名称，使用默认名称
-			name = "Default"
-			url = sub
-		}
-
-		// 验证URL格式
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-			log.Printf("无效的URL格式: %s", url)
-			continue
-		}
-
-		wg.Add(1)
-		go func(name, url string) {
-			defer wg.Done()
-			if subNodes, err := fetchSubscription(url); err != nil {
-				log.Printf("获取订阅失败 %s: %v", name, err)
-			} else {
-				nodesMutex.Lock()
-				nodes[name] = subNodes
-				nodesMutex.Unlock()
-			}
-		}(name, url)
-	}
-	wg.Wait()
-
-	// 添加自定义节点
-	if customNodes := os.Getenv("NODE"); customNodes != "" {
-		nodes["Custom"] = strings.Split(customNodes, "\n")
-	}
-
-	// 处理所有节点
-	allNodes := make([]string, 0)
-	for source, sourceNodes := range nodes {
-		for _, node := range sourceNodes {
-			// 跳过空节点
-			if strings.TrimSpace(node) == "" {
-				continue
-			}
-			
-			processedNode, err := processNode(source, node)
-			if err != nil {
-				log.Printf("处理节点失败 [%s]: %v", node, err)
-				continue
-			}
-			allNodes = append(allNodes, processedNode)
-		}
-	}
-
-	// 检查是否成功处理了任何节点
 	if len(allNodes) == 0 {
 		return fmt.Errorf("没有成功处理任何节点")
 	}
 
-	// 检查节点内容是否为空
-	content := strings.Join(allNodes, "\n")
+	// 2. 并发检测节点质量
+	checked := DetectNodesAdapter(allNodes, 20)
+
+	// 3. 重命名/筛选节点
+	var outputLines []string
+	for _, info := range checked {
+		if info == nil || !FilterNode(info.Meta, info) {
+			continue // 跳过检测失败或不符合筛选条件
+		}
+		name := RenameNode(info.Meta, info)
+		line := mapToSurgeLine(info.Meta, name)
+		outputLines = append(outputLines, line)
+	}
+
+	content := strings.Join(outputLines, "\n")
 	if strings.TrimSpace(content) == "" {
 		return fmt.Errorf("生成的节点配置为空")
 	}
 
-	// 写入配置文件
 	nodePath := filepath.Join(fusionDir, "node.conf")
 	return os.WriteFile(nodePath, []byte(content), 0644)
 }
@@ -196,38 +137,60 @@ func fetchSubscription(url string) ([]string, error) {
 	return nil, lastErr
 }
 
-func processNode(source, node string) (string, error) {
-	// 预处理节点，获取域名IP
-	processedNodes, err := processIngressNode(node)
-	if err != nil {
-		return "", fmt.Errorf("获取位置信息失败: %v", err)
-	}
-
-	// 处理所有解析出的节点
-	nodeList := strings.Split(processedNodes, "\n")
-	if len(nodeList) == 0 {
-		return "", fmt.Errorf("处理节点后未得到有效节点")
-	}
-
-	// 处理每个节点
-	var processedNodeList []string
-	for _, processedNode := range nodeList {
-		// 获取节点信息
-		info, err := getEgressInfo(processedNode)
-		if err != nil {
-			log.Printf("获取节点信息失败 [%s]: %v", processedNode, err)
+// map 转 Surge 格式
+func mapToSurgeLine(m map[string]any, name string) string {
+	typ := m["type"]
+	server := m["server"]
+	port := m["port"]
+	var params []string
+	for k, v := range m {
+		if k == "name" || k == "type" || k == "server" || k == "port" || k == "source" {
 			continue
 		}
+		params = append(params, fmt.Sprintf("%s=%v", k, v))
+	}
+	return fmt.Sprintf("%s = %s, %s, %s, %s", name, typ, server, port, strings.Join(params, ", "))
+}
 
-		// 重命名节点
-		parts := strings.SplitN(processedNode, "=", 2)
-		if len(parts) != 2 {
-			log.Printf("无效的节点格式: %s", processedNode)
-			continue
-		}
+// DetectNodesAdapter 并发检测所有节点，集成 adapter 机制
+func DetectNodesAdapter(nodes []map[string]any, maxConcurrent int) []*NodeInfo {
+	var wg sync.WaitGroup
+	results := make([]*NodeInfo, len(nodes))
+	tasks := make(chan struct{
+		idx int
+		meta map[string]any
+	}, len(nodes))
 
-		// 转换NAT类型为字母
-		natType := "D" // Unknown
+	for i := 0; i < maxConcurrent; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range tasks {
+				info, err := getEgressInfoAdapter(task.meta)
+				if err == nil {
+					info.Meta = task.meta
+					results[task.idx] = info
+				} else {
+					results[task.idx] = nil
+				}
+			}
+		}()
+	}
+	for idx, meta := range nodes {
+		tasks <- struct{
+			idx int
+			meta map[string]any
+		}{idx, meta}
+	}
+	close(tasks)
+	wg.Wait()
+	return results
+}
+
+// 节点重命名函数
+func RenameNode(m map[string]any, info *NodeInfo) string {
+	if info.ISOCode == "HK" {
+		natType := "D"
 		switch info.NATType {
 		case "FullCone":
 			natType = "A"
@@ -238,40 +201,82 @@ func processNode(source, node string) (string, error) {
 		case "Symmetric":
 			natType = "D"
 		}
+		return fmt.Sprintf("%s %s%s-🔀%s-%02d", m["source"], strings.ToUpper(info.ISOCode), info.Flag, natType, info.Count)
+	}
+	return fmt.Sprintf("%s %s%s-%02d", m["source"], strings.ToUpper(info.ISOCode), info.Flag, info.Count)
+}
 
-		// 格式化节点名称
-		var newName string
-		if info.ISOCode == "HK" {
-			// 香港节点显示完整信息: {机场名} {iso二字代码}{旗帜emoji}-T{trace节点数}🔀{nat类型字母}-{两位计数编号}
-			newName = fmt.Sprintf("%s %s%s-T%d🔀%s-%02d",
-				strings.TrimSpace(source),
-				strings.ToUpper(info.ISOCode),
-				info.Flag,
-				info.TraceCount,
-				natType,
-				info.Count)
+// 节点筛选函数
+func FilterNode(m map[string]any, info *NodeInfo) bool {
+	if info.ISOCode == "" {
+		return false
+	}
+	// 可扩展更多筛选条件
+	return true
+}
+
+// 拉取并解析所有节点
+func FetchAndParseNodes() ([]map[string]any, error) {
+	subs := strings.TrimSpace(os.Getenv("SUB"))
+	if subs == "" {
+		return nil, fmt.Errorf("未设置SUB环境变量")
+	}
+	subList := strings.Split(subs, "||")
+	nodes := make(map[string][]string)
+	var nodesMutex sync.Mutex
+
+	// 并发拉取订阅
+	var wg sync.WaitGroup
+	for _, sub := range subList {
+		var name, url string
+		if strings.Contains(sub, "=") {
+			parts := strings.SplitN(sub, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			name, url = parts[0], parts[1]
 		} else {
-			// 非香港节点只显示基本信息: {机场名} {iso二字代码}{旗帜emoji}-{两位计数编号}
-			newName = fmt.Sprintf("%s %s%s-%02d",
-				strings.TrimSpace(source),
-				strings.ToUpper(info.ISOCode),
-				info.Flag,
-				info.Count)
+			name = "Default"
+			url = sub
 		}
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			continue
+		}
+		wg.Add(1)
+		go func(name, url string) {
+			defer wg.Done()
+			subNodes, err := fetchSubscription(url)
+			if err != nil {
+				return
+			}
+			nodesMutex.Lock()
+			nodes[name] = subNodes
+			nodesMutex.Unlock()
+		}(name, url)
+	}
+	wg.Wait()
 
-		// 转换布尔值
-		config := strings.TrimSpace(parts[1])
-		config = strings.ReplaceAll(config, "true", "1")
-		config = strings.ReplaceAll(config, "false", "0")
-
-		processedNodeList = append(processedNodeList, fmt.Sprintf("%s = %s", newName, config))
+	// 添加自定义节点
+	if customNodes := os.Getenv("NODE"); customNodes != "" {
+		nodes["Custom"] = strings.Split(customNodes, "\n")
 	}
 
-	// 如果所有节点都处理失败，返回错误
-	if len(processedNodeList) == 0 {
-		return "", fmt.Errorf("所有节点处理失败")
+	// 结构化所有节点
+	var allNodeMaps []map[string]any
+	for source, sourceNodes := range nodes {
+		for _, node := range sourceNodes {
+			if strings.TrimSpace(node) == "" {
+				continue
+			}
+			nodeMaps, err := processIngressNode(node)
+			if err != nil {
+				continue
+			}
+			for _, m := range nodeMaps {
+				m["source"] = source
+				allNodeMaps = append(allNodeMaps, m)
+			}
+		}
 	}
-
-	// 返回所有成功处理的节点
-	return strings.Join(processedNodeList, "\n"), nil
+	return allNodeMaps, nil
 }

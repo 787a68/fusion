@@ -8,47 +8,35 @@ import (
 	"time"
 )
 
-func processIngressNode(node string) (string, error) {
-	// 移除可能的 BOM 标记和空格
+func processIngressNode(node string) ([]map[string]any, error) {
 	node = strings.TrimSpace(node)
-	
-	// 处理节点格式
 	parts := strings.SplitN(node, "=", 2)
 	if len(parts) != 2 {
-		return "", fmt.Errorf("无效的节点格式: %s", node)
+		return nil, fmt.Errorf("无效的节点格式: %s", node)
 	}
-
-	name, config := parts[0], strings.TrimSpace(parts[1])
-	
-	// 清理名称中的特殊字符
-	name = strings.TrimSpace(name)
-	name = strings.Trim(name, "[]")
-	
-	// 解析配置参数
+	name, config := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	params := parseIngressParams(config)
-
-	// 判断代理类型
 	proxyType := getProxyType(config)
 	if proxyType == "" {
-		return "", fmt.Errorf("不支持的代理类型: %s", config)
+		return nil, fmt.Errorf("不支持的代理类型: %s", config)
 	}
-
-	// 获取服务器地址
 	server := params["server"]
 	if server == "" {
-		return "", fmt.Errorf("未找到服务器地址")
+		return nil, fmt.Errorf("未找到服务器地址")
 	}
 
-	// 检查是否为IP地址
+	// 解析为 map[string]any
+	nodeMap := make(map[string]any)
+	nodeMap["name"] = name
+	for k, v := range params {
+		nodeMap[k] = v
+	}
+
+	// DNS 查询
 	if net.ParseIP(server) != nil {
-		// 如果是IP地址，直接返回处理后的节点
-		if params["sni"] == "" && needsTLS(proxyType) {
-			config = addSNI(config, server)
-		}
-		return fmt.Sprintf("%s = %s", name, config), nil
+		nodeMap["server"] = server
+		return []map[string]any{nodeMap}, nil
 	}
-
-	// 执行DNS查询（带超时控制）
 	resolver := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -58,32 +46,22 @@ func processIngressNode(node string) (string, error) {
 			return d.DialContext(ctx, network, address)
 		},
 	}
-	
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	
 	ips, err := resolver.LookupHost(ctx, server)
-	if err != nil {
-		return "", fmt.Errorf("DNS解析失败 %s: %v", server, err)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("DNS解析失败 %s: %v", server, err)
 	}
-	
-	if len(ips) == 0 {
-		return "", fmt.Errorf("未找到IP地址: %s", server)
-	}
-
-	// 只对需要 TLS 的协议且没有 SNI 的添加 SNI
-	if params["sni"] == "" && needsTLS(proxyType) {
-		config = addSNI(config, server)
-	}
-
-	// 替换服务器地址为IP
-	nodeList := make([]string, 0, len(ips))
+	var result []map[string]any
 	for _, ip := range ips {
-		newConfig := strings.Replace(config, server, ip, 1)
-		nodeList = append(nodeList, fmt.Sprintf("%s = %s", name, newConfig))
+		m := make(map[string]any)
+		for k, v := range nodeMap {
+			m[k] = v
+		}
+		m["server"] = ip
+		result = append(result, m)
 	}
-
-	return strings.Join(nodeList, "\n"), nil
+	return result, nil
 }
 
 func getProxyType(config string) string {
