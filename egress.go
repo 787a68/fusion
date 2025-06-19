@@ -224,6 +224,19 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 
 // CreateAdapterClient 用 adapter 机制生成独立代理 client
 func CreateAdapterClient(meta map[string]any) *ProxyClient {
+	// 只转换明确为 bool 的参数
+	boolKeys := []string{"tfo", "udp-relay", "tls", "skip-cert-verify", "allow-lan", "sni-proxy"}
+	for _, key := range boolKeys {
+		if v, ok := meta[key]; ok {
+			if s, ok := v.(string); ok {
+				if s == "true" {
+					meta[key] = true
+				} else if s == "false" {
+					meta[key] = false
+				}
+			}
+		}
+	}
 	// 依赖 mihomo adapter/constant
 	proxy, err := adapter.ParseProxy(meta)
 	if err != nil {
