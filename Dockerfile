@@ -15,7 +15,9 @@ ARG VERSION=dev
 # 分步执行，便于调试
 RUN go mod init fusion
 RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags "-X main.Version=${VERSION}" -o fusion .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -o fusion \
+    -ldflags "-X main.Version=${VERSION}" \
+    main.go server.go update.go ingress.go egress.go
 
 # 最终镜像
 FROM alpine:latest

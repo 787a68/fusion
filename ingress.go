@@ -97,37 +97,6 @@ func addSNI(config string, server string) string {
 	return strings.Join(parts, ",")
 }
 
-func parseIngressParams(config string) map[string]string {
-	params := make(map[string]string)
-	parts := strings.Split(config, ",")
-
-	// 处理第一个参数（协议类型）
-	if len(parts) > 0 {
-		params["type"] = strings.TrimSpace(parts[0])
-	}
-
-	// 处理第二个参数（服务器地址）
-	if len(parts) > 1 {
-		params["server"] = strings.TrimSpace(parts[1])
-	}
-
-	// 处理第三个参数（端口）
-	if len(parts) > 2 {
-		params["port"] = strings.TrimSpace(parts[2])
-	}
-
-	// 处理剩余的参数
-	for i := 3; i < len(parts); i++ {
-		part := strings.TrimSpace(parts[i])
-		keyVal := strings.SplitN(part, "=", 2)
-		if len(keyVal) == 2 {
-			params[strings.TrimSpace(keyVal[0])] = strings.TrimSpace(keyVal[1])
-		}
-	}
-
-	return params
-}
-
 // 判断协议是否需要 TLS
 func needsTLS(proxyType string) bool {
 	// 白名单：需要 TLS 的协议
