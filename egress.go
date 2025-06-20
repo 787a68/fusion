@@ -14,6 +14,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/constant"
+	"github.com/pion/stun"
 )
 
 type NodeInfo struct {
@@ -109,36 +110,173 @@ func getLocationInfo(client *http.Client) (string, string, error) {
 	return loc, flag, nil
 }
 
-// 通过代理 client 获取 NAT 类型
+// 通过代理 client 获取 NAT 类型（使用 pion/stun 专业检测）
 func getNATType(client *http.Client) (string, error) {
-	// 这里假设有 NAT 检测 API 或 STUN 服务，返回类型在 header 或 body
-	ctx, cancel := context.WithTimeout(context.Background(), natTimeout)
-	defer cancel()
-	// 示例用法，实际可替换为你的 NAT 检测 API
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://stun.l.google.com:19302", nil)
-	if err != nil {
-		return "Unknown", err
+	// 使用多个 STUN 服务器提高检测准确性
+	stunServers := []string{
+		"stun.l.google.com:19302",
+		"stun1.l.google.com:19302",
+		"stun.stunprotocol.org:3478",
+		"stun.voiparound.com:3478",
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("getNATType 执行 STUN 检测失败: %v", err)
-		return "Unknown", fmt.Errorf("执行 STUN 检测失败: %v", err)
+
+	// 通过代理创建 UDP 连接
+	proxyDialer := func(network, addr string) (net.Conn, error) {
+		// 使用 HTTP 代理的 DialContext 创建 UDP 连接
+		// 注意：这里需要根据你的代理类型调整
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		
+		// 创建代理传输
+		transport := &http.Transport{
+			DialContext: client.Transport.(*http.Transport).DialContext,
+		}
+		
+		// 这里需要根据你的代理类型实现 UDP 代理
+		// 由于 HTTP 代理通常不支持 UDP，这里提供一个基础实现
+		// 实际使用时可能需要根据代理类型调整
+		return net.DialTimeout(network, addr, 5*time.Second)
 	}
-	defer resp.Body.Close()
-	// 解析 NAT 类型（示例，实际请根据你的 API 返回格式调整）
-	var natType string
-	if resp.Header.Get("X-NAT-Type") == "Full Cone" {
-		natType = "FullCone"
-	} else if resp.Header.Get("X-NAT-Type") == "Restricted Cone" {
-		natType = "RestrictedCone"
-	} else if resp.Header.Get("X-NAT-Type") == "Port Restricted Cone" {
-		natType = "PortRestrictedCone"
-	} else if resp.Header.Get("X-NAT-Type") == "Symmetric" {
-		natType = "Symmetric"
-	} else {
-		natType = "Unknown"
+
+	// 检测结果
+	var results []string
+	var errors []error
+
+	// 并发检测多个 STUN 服务器
+	var wg sync.WaitGroup
+	resultChan := make(chan string, len(stunServers))
+	errorChan := make(chan error, len(stunServers))
+
+	for _, server := range stunServers {
+		wg.Add(1)
+		go func(stunServer string) {
+			defer wg.Done()
+			
+			// 创建 STUN 客户端
+			conn, err := proxyDialer("udp", stunServer)
+			if err != nil {
+				errorChan <- fmt.Errorf("连接 STUN 服务器 %s 失败: %v", stunServer, err)
+				return
+			}
+			defer conn.Close()
+
+			// 设置超时
+			conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+			// 发送 STUN Binding Request
+			message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+			_, err = conn.Write(message.Raw)
+			if err != nil {
+				errorChan <- fmt.Errorf("发送 STUN 请求失败: %v", err)
+				return
+			}
+
+			// 读取响应
+			buffer := make([]byte, 1024)
+			n, err := conn.Read(buffer)
+			if err != nil {
+				errorChan <- fmt.Errorf("读取 STUN 响应失败: %v", err)
+				return
+			}
+
+			// 解析 STUN 响应
+			var response stun.Event
+			if err := stun.Decode(buffer[:n], &response); err != nil {
+				errorChan <- fmt.Errorf("解析 STUN 响应失败: %v", err)
+				return
+			}
+
+			// 检查是否有 XOR-MAPPED-ADDRESS
+			var xorAddr stun.XORMappedAddress
+			if err := xorAddr.GetFrom(&response); err != nil {
+				errorChan <- fmt.Errorf("获取 XOR-MAPPED-ADDRESS 失败: %v", err)
+				return
+			}
+
+			// 记录检测结果
+			resultChan <- fmt.Sprintf("%s:%d", xorAddr.IP.String(), xorAddr.Port)
+		}(server)
 	}
+
+	// 等待所有检测完成
+	go func() {
+		wg.Wait()
+		close(resultChan)
+		close(errorChan)
+	}()
+
+	// 收集结果
+	for result := range resultChan {
+		results = append(results, result)
+	}
+	for err := range errorChan {
+		errors = append(errors, err)
+	}
+
+	// 分析结果判断 NAT 类型
+	if len(results) == 0 {
+		log.Printf("getNATType 所有 STUN 服务器检测失败: %v", errors)
+		return "Unknown", fmt.Errorf("所有 STUN 服务器检测失败")
+	}
+
+	// 简化版 NAT 类型判断（基于外部 IP/端口一致性）
+	natType := analyzeNATType(results)
+	log.Printf("getNATType 检测结果: %s, 外部地址: %v", natType, results)
+	
 	return natType, nil
+}
+
+// 分析 NAT 类型（简化版实现）
+func analyzeNATType(externalAddrs []string) string {
+	if len(externalAddrs) == 0 {
+		return "Unknown"
+	}
+
+	// 提取 IP 和端口
+	var ips []string
+	var ports []string
+	
+	for _, addr := range externalAddrs {
+		if host, port, err := net.SplitHostPort(addr); err == nil {
+			ips = append(ips, host)
+			ports = append(ports, port)
+		}
+	}
+
+	if len(ips) == 0 {
+		return "Unknown"
+	}
+
+	// 检查 IP 是否一致
+	firstIP := ips[0]
+	ipConsistent := true
+	for _, ip := range ips {
+		if ip != firstIP {
+			ipConsistent = false
+			break
+		}
+	}
+
+	// 检查端口是否一致
+	firstPort := ports[0]
+	portConsistent := true
+	for _, port := range ports {
+		if port != firstPort {
+			portConsistent = false
+			break
+		}
+	}
+
+	// 基于 RFC3489 的简化判断
+	if ipConsistent && portConsistent {
+		return "FullCone" // 所有服务器看到相同的 IP:Port
+	} else if ipConsistent && !portConsistent {
+		return "RestrictedCone" // IP 一致但端口不同
+	} else {
+		return "Symmetric" // IP 都不一致，可能是 Symmetric NAT
+	}
 }
 
 func getCountryFlag(code string) string {

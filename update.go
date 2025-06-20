@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,10 @@ func updateNodes() error {
 	}
 
 	content := strings.Join(outputLines, "\n")
+	// 输出前排序
+	lines := strings.Split(content, "\n")
+	sort.Strings(lines)
+	content = strings.Join(lines, "\n")
 	if strings.TrimSpace(content) == "" {
 		log.Printf("updateNodes 生成的节点配置为空")
 		return fmt.Errorf("生成的节点配置为空")
@@ -353,10 +358,8 @@ func buildSurgeLine(params map[string]string, order []string) string {
 		mainParts = []string{typeStr, server, port}
 	}
 
-	exist := map[string]struct{}{"type":{}, "server":{}, "port":{}}
-	for _, k := range []string{"encrypt-method", "password", "sni", "username", "ws", "ws-path", "ws-headers", "tls", "skip-cert-verify"} {
-		exist[k] = struct{}{}
-	}
+	// 只跳过 type/server/port/name，其余参数全部输出
+	exist := map[string]struct{}{"type":{}, "server":{}, "port":{}, "name":{}}
 	for _, key := range order {
 		if _, skip := exist[key]; skip {
 			continue
