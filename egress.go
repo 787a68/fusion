@@ -112,7 +112,6 @@ func getLocationInfo(client *http.Client) (string, string, error) {
 
 // 通过代理 client 获取 NAT 类型（使用 pion/stun 专业检测）
 func getNATType(client *http.Client) (string, error) {
-	// 使用多个 STUN 服务器提高检测准确性
 	stunServers := []string{
 		"stun.l.google.com:19302",
 		"stun1.l.google.com:19302",
@@ -120,94 +119,69 @@ func getNATType(client *http.Client) (string, error) {
 		"stun.voiparound.com:3478",
 	}
 
-	// 通过代理创建 UDP 连接
 	proxyDialer := func(network, addr string) (net.Conn, error) {
-		// 使用 HTTP 代理的 DialContext 创建 UDP 连接
-		// 注意：这里需要根据你的代理类型调整
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
 		}
-		
-		// 创建代理传输
-		transport := &http.Transport{
-			DialContext: client.Transport.(*http.Transport).DialContext,
-		}
-		
-		// 这里需要根据你的代理类型实现 UDP 代理
-		// 由于 HTTP 代理通常不支持 UDP，这里提供一个基础实现
-		// 实际使用时可能需要根据代理类型调整
+		// 这里只做基础实现，实际如代理不支持 UDP，直接返回错误
 		return net.DialTimeout(network, addr, 5*time.Second)
 	}
 
-	// 检测结果
 	var results []string
 	var errors []error
 
-	// 并发检测多个 STUN 服务器
 	var wg sync.WaitGroup
 	resultChan := make(chan string, len(stunServers))
 	errorChan := make(chan error, len(stunServers))
+
+	udpSupported := false
 
 	for _, server := range stunServers {
 		wg.Add(1)
 		go func(stunServer string) {
 			defer wg.Done()
-			
-			// 创建 STUN 客户端
 			conn, err := proxyDialer("udp", stunServer)
-			if err != nil {
-				errorChan <- fmt.Errorf("连接 STUN 服务器 %s 失败: %v", stunServer, err)
+			if err != nil || conn == nil {
+				// 代理不支持 UDP，直接返回 Unknown
 				return
 			}
+			udpSupported = true
 			defer conn.Close()
 
-			// 设置超时
 			conn.SetDeadline(time.Now().Add(5 * time.Second))
-
-			// 发送 STUN Binding Request
 			message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
 			_, err = conn.Write(message.Raw)
 			if err != nil {
 				errorChan <- fmt.Errorf("发送 STUN 请求失败: %v", err)
 				return
 			}
-
-			// 读取响应
 			buffer := make([]byte, 1024)
 			n, err := conn.Read(buffer)
 			if err != nil {
 				errorChan <- fmt.Errorf("读取 STUN 响应失败: %v", err)
 				return
 			}
-
-			// 解析 STUN 响应
 			var response stun.Event
 			if err := stun.Decode(buffer[:n], &response); err != nil {
 				errorChan <- fmt.Errorf("解析 STUN 响应失败: %v", err)
 				return
 			}
-
-			// 检查是否有 XOR-MAPPED-ADDRESS
 			var xorAddr stun.XORMappedAddress
 			if err := xorAddr.GetFrom(&response); err != nil {
 				errorChan <- fmt.Errorf("获取 XOR-MAPPED-ADDRESS 失败: %v", err)
 				return
 			}
-
-			// 记录检测结果
 			resultChan <- fmt.Sprintf("%s:%d", xorAddr.IP.String(), xorAddr.Port)
 		}(server)
 	}
 
-	// 等待所有检测完成
 	go func() {
 		wg.Wait()
 		close(resultChan)
 		close(errorChan)
 	}()
 
-	// 收集结果
 	for result := range resultChan {
 		results = append(results, result)
 	}
@@ -215,16 +189,18 @@ func getNATType(client *http.Client) (string, error) {
 		errors = append(errors, err)
 	}
 
-	// 分析结果判断 NAT 类型
+	if !udpSupported {
+		log.Printf("getNATType: 代理不支持 UDP，无法检测 NAT 类型")
+		return "Unknown", fmt.Errorf("代理不支持 UDP")
+	}
+
 	if len(results) == 0 {
 		log.Printf("getNATType 所有 STUN 服务器检测失败: %v", errors)
 		return "Unknown", fmt.Errorf("所有 STUN 服务器检测失败")
 	}
 
-	// 简化版 NAT 类型判断（基于外部 IP/端口一致性）
 	natType := analyzeNATType(results)
 	log.Printf("getNATType 检测结果: %s, 外部地址: %v", natType, results)
-	
 	return natType, nil
 }
 

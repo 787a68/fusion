@@ -226,6 +226,8 @@ func RenameNode(m map[string]any, info *NodeInfo) string {
 			natType = "C"
 		case "Symmetric":
 			natType = "D"
+		case "Unknown":
+			natType = "U"
 		}
 		return fmt.Sprintf("%s %s%s-🔀%s-%02d", m["source"], strings.ToUpper(info.ISOCode), info.Flag, natType, info.Count)
 	}
