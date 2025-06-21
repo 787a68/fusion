@@ -72,10 +72,62 @@ func updateNodes() error {
 			successBySource[source]++
 		}
 	}
+
+	// 统计每个机场被去重的节点数量
+	// 统计方式：订阅原始节点数 - allNodeMaps 里该机场节点数
+	subs := strings.TrimSpace(os.Getenv("SUB"))
+	customNodes := os.Getenv("NODE")
+	allSources := map[string]struct{}{}
+	for k := range successBySource {
+		allSources[k] = struct{}{}
+	}
+	for k := range failBySource {
+		allSources[k] = struct{}{}
+	}
+	// 统计原始节点数
+	originCount := make(map[string]int)
+	if subs != "" {
+		subList := strings.Split(subs, "||")
+		for _, sub := range subList {
+			var name, url string
+			if strings.Contains(sub, "=") {
+				parts := strings.SplitN(sub, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				name, url = parts[0], parts[1]
+			} else {
+				name = "Default"
+				url = sub
+			}
+			if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+				continue
+			}
+			// 拉取订阅内容
+			nodes, _ := fetchSubscription(url)
+			originCount[name] += len(nodes)
+		}
+	}
+	if customNodes != "" {
+		lines := strings.Split(customNodes, "\n")
+		originCount["Custom"] += len(lines)
+	}
+	// 统计 allNodeMaps（去重后）数量
+	actualCount := make(map[string]int)
+	for _, m := range allNodes {
+		if s, ok := m["source"].(string); ok {
+			actualCount[s]++
+		}
+	}
+	// 输出统计
 	logStr := ""
-	for source, succ := range successBySource {
+	for source := range allSources {
+		succ := successBySource[source]
 		fail := failBySource[source]
-		logStr += source + " 成功: " + fmt.Sprint(succ) + ", 失败: " + fmt.Sprint(fail) + "; "
+		origin := originCount[source]
+		actual := actualCount[source]
+		dup := origin - actual
+		logStr += source + " 成功: " + fmt.Sprint(succ) + ", 失败: " + fmt.Sprint(fail) + ", 去重: " + fmt.Sprint(dup) + "; "
 	}
 	log.Printf("各上游机场节点统计: %s", logStr)
 
