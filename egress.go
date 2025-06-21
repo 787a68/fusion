@@ -345,19 +345,19 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 	mihomoMeta := adaptForMihomo(params)
 	proxy, err := adapter.ParseProxy(mihomoMeta)
 	if err != nil {
-		log.Printf("getEgressInfoAdapter adapter.ParseProxy 失败: %v\nmeta: %+v\nmihomoMeta: %+v", err, meta, mihomoMeta)
+		log.Printf("getEgressInfoAdapter adapter.ParseProxy失败: %v: 原始params=%+v | mihomoMeta=%+v", err, params, mihomoMeta)
 		return nil, fmt.Errorf("adapter.ParseProxy 失败")
 	}
 	client := CreateAdapterClient(mihomoMeta)
 	if client == nil {
-		log.Printf("getEgressInfoAdapter adapter client 创建失败, meta: %+v", meta)
+		log.Printf("getEgressInfoAdapter adapter client创建失败: 原始params=%+v | mihomoMeta=%+v", params, mihomoMeta)
 		return nil, fmt.Errorf("adapter client 创建失败")
 	}
 	defer client.Close()
 
 	iso, flag, err := getLocationInfo(client.Client)
 	if err != nil {
-		log.Printf("getEgressInfoAdapter 地理位置测试失败: %v, meta: %+v", err, meta)
+		log.Printf("getEgressInfoAdapter 地理位置测试失败: %v: 原始params=%+v | mihomoMeta=%+v", err, params, mihomoMeta)
 		return nil, fmt.Errorf("地理位置测试失败: %v", err)
 	}
 
@@ -371,7 +371,7 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 	if iso == "HK" {
 		natType, err := getNATType(proxy)
 		if err != nil {
-			log.Printf("getEgressInfoAdapter NAT类型检测失败: %v, meta: %+v", err, meta)
+			log.Printf("getEgressInfoAdapter NAT类型检测失败: %v: 原始params=%+v | mihomoMeta=%+v", err, params, mihomoMeta)
 		}
 		info.NATType = natType
 	}
