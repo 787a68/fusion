@@ -37,7 +37,7 @@ func updateNodes() error {
 	for _, info := range checked {
 		if info == nil || !FilterNode(info.Meta, info) {
 			continue // 跳过检测失败或不符合筛选条件
-			}
+		}
 		name := RenameNode(info.Meta, info)
 		// 从 Meta 取出 _params 和 _order
 		params, ok1 := info.Meta["_params"].(map[string]string)
@@ -50,7 +50,7 @@ func updateNodes() error {
 		delete(params, "name") // 确保最终输出不含 name 字段
 		line := fmt.Sprintf("%s = %s", name, buildSurgeLine(params, order))
 		outputLines = append(outputLines, line)
-			}
+	}
 
 	content := strings.Join(outputLines, "\n")
 	// 输出前自然排序
@@ -58,19 +58,17 @@ func updateNodes() error {
 	natsort.Sort(lines)
 	content = strings.Join(lines, "\n")
 
-	// 统计每个上游机场的成功/失败节点数量
+	// 统计每个上游机场的成功/失败节点数量（用 allNodes 和 checked 索引一一对应）
 	successBySource := make(map[string]int)
 	failBySource := make(map[string]int)
-	for _, info := range checked {
+	for i, info := range checked {
+		source := ""
+		if s, ok := allNodes[i]["source"].(string); ok {
+			source = s
+		}
 		if info == nil {
-			if meta, ok := info.Meta["source"]; ok {
-				source := meta.(string)
-				failBySource[source]++
-			}
-				continue
-			}
-		if meta, ok := info.Meta["source"]; ok {
-			source := meta.(string)
+			failBySource[source]++
+		} else {
 			successBySource[source]++
 		}
 	}
