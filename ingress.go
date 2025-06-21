@@ -57,7 +57,14 @@ func processIngressNode(node string) ([]map[string]any, error) {
 		return nil, fmt.Errorf("DNS解析失败 %s: %v", server, err)
 	}
 	var result []map[string]any
+	seen := make(map[string]struct{}) // ip:port 去重
 	for _, ip := range ips {
+		port := params["port"]
+		key := ip + ":" + port
+		if _, exists := seen[key]; exists {
+			continue // 跳过重复
+		}
+		seen[key] = struct{}{}
 		m := make(map[string]any)
 		for k, v := range nodeMap {
 			m[k] = v

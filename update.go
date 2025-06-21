@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"github.com/facette/natsort"
 )
 
 func updateNodes() error {
@@ -47,15 +48,42 @@ func updateNodes() error {
 			continue
 		}
 		formatBoolParams(params)
+		delete(params, "name") // 确保最终输出不含 name 字段
 		line := fmt.Sprintf("%s = %s", name, buildSurgeLine(params, order))
 		outputLines = append(outputLines, line)
 	}
 
 	content := strings.Join(outputLines, "\n")
-	// 输出前排序
+	// 输出前自然排序
 	lines := strings.Split(content, "\n")
-	sort.Strings(lines)
+	natsort.SortStrings(lines)
 	content = strings.Join(lines, "\n")
+
+	// 统计每个上游机场的成功/失败节点数量
+	successBySource := make(map[string]int)
+	failBySource := make(map[string]int)
+	for _, info := range checked {
+		if info == nil {
+			if meta, ok := info.Meta["source"]; ok {
+				source := meta.(string)
+				failBySource[source]++
+			}
+			continue
+		}
+		if meta, ok := info.Meta["source"]; ok {
+			source := meta.(string)
+			successBySource[source]++
+		}
+	}
+	logStr := ""
+	for source, succ := range successBySource {
+		fail := failBySource[source]
+		logStr += source + " 成功: " + fmt.Sprint(succ) + ", 失败: " + fmt.Sprint(fail) + "; "
+	}
+	log.Printf("各上游机场节点统计: %s", logStr)
+
+	log.Printf("成功节点数量: %d，失败节点数量: %d", len(outputLines), len(checked)-len(outputLines))
+
 	if strings.TrimSpace(content) == "" {
 		log.Printf("updateNodes 生成的节点配置为空")
 		return fmt.Errorf("生成的节点配置为空")
@@ -216,7 +244,7 @@ func DetectNodesAdapter(nodes []map[string]any, maxConcurrent int) []*NodeInfo {
 // 节点重命名函数
 func RenameNode(m map[string]any, info *NodeInfo) string {
 	if info.ISOCode == "HK" {
-		natType := "D"
+		natType := "U" // 默认 Unknown
 		switch info.NATType {
 		case "FullCone":
 			natType = "A"
@@ -226,8 +254,6 @@ func RenameNode(m map[string]any, info *NodeInfo) string {
 			natType = "C"
 		case "Symmetric":
 			natType = "D"
-		case "Unknown":
-			natType = "U"
 		}
 		return fmt.Sprintf("%s %s%s-🔀%s-%02d", m["source"], strings.ToUpper(info.ISOCode), info.Flag, natType, info.Count)
 	}

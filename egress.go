@@ -51,7 +51,6 @@ var (
 const (
 	// 全局超时设置
 	locationTimeout    = 3 * time.Second    // 位置信息获取超时
-	traceTimeout       = 20 * time.Second   // trace 检测超时
 	natTimeout         = 3 * time.Second    // NAT 检测超时
 	totalTimeout       = 25 * time.Second   // 总超时时间
 )
@@ -110,43 +109,40 @@ func getLocationInfo(client *http.Client) (string, string, error) {
 	return loc, flag, nil
 }
 
-// 通过代理 client 获取 NAT 类型（使用 pion/stun 专业检测）
-func getNATType(client *http.Client) (string, error) {
-	stunServers := []string{
-		"stun.l.google.com:19302",
-		"stun1.l.google.com:19302",
-		"stun.stunprotocol.org:3478",
-		"stun.voiparound.com:3478",
+// 通过代理 proxy 获取 NAT 类型（使用 pion/stun 专业检测，走 UDP relay）
+func getNATType(proxy constant.Proxy) (string, error) {
+	stunServers := []struct{
+		Host string
+		Port uint16
+	}{
+		{"stun.l.google.com", 19302},
+		{"stun1.l.google.com", 19302},
+		{"stun.stunprotocol.org", 3478},
+		{"stun.voiparound.com", 3478},
 	}
 
-	proxyDialer := func(network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
-		// 这里只做基础实现，实际如代理不支持 UDP，直接返回错误
-		return net.DialTimeout(network, addr, 5*time.Second)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	var results []string
 	var errors []error
-
 	var wg sync.WaitGroup
 	resultChan := make(chan string, len(stunServers))
 	errorChan := make(chan error, len(stunServers))
 
-	udpSupported := false
-
 	for _, server := range stunServers {
 		wg.Add(1)
-		go func(stunServer string) {
+		go func(host string, port uint16) {
 			defer wg.Done()
-			conn, err := proxyDialer("udp", stunServer)
+			conn, err := proxy.DialContext(ctx, &constant.Metadata{
+				Host:    host,
+				DstPort: port,
+				Network: "udp",
+			})
 			if err != nil || conn == nil {
-				// 代理不支持 UDP，直接返回 Unknown
+				errorChan <- fmt.Errorf("UDP relay 失败: %v", err)
 				return
 			}
-			udpSupported = true
 			defer conn.Close()
 
 			conn.SetDeadline(time.Now().Add(5 * time.Second))
@@ -173,7 +169,7 @@ func getNATType(client *http.Client) (string, error) {
 				return
 			}
 			resultChan <- fmt.Sprintf("%s:%d", xorAddr.IP.String(), xorAddr.Port)
-		}(server)
+		}(server.Host, server.Port)
 	}
 
 	go func() {
@@ -187,11 +183,6 @@ func getNATType(client *http.Client) (string, error) {
 	}
 	for err := range errorChan {
 		errors = append(errors, err)
-	}
-
-	if !udpSupported {
-		log.Printf("getNATType: 代理不支持 UDP，无法检测 NAT 类型")
-		return "Unknown", fmt.Errorf("代理不支持 UDP")
 	}
 
 	if len(results) == 0 {
@@ -332,10 +323,13 @@ func isPortOpen(port int) bool {
 
 // adapter 机制：每节点独立 client 检测
 func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
-	// 取出原始参数并适配 Mihomo/Clash
 	params, _ := meta["_params"].(map[string]string)
 	mihomoMeta := adaptForMihomo(params)
-	// 1. 生成独立代理 client
+	proxy, err := adapter.ParseProxy(mihomoMeta)
+	if err != nil {
+		log.Printf("getEgressInfoAdapter adapter.ParseProxy 失败: %v, meta: %+v", err, meta)
+		return nil, fmt.Errorf("adapter.ParseProxy 失败")
+	}
 	client := CreateAdapterClient(mihomoMeta)
 	if client == nil {
 		log.Printf("getEgressInfoAdapter adapter client 创建失败, meta: %+v", meta)
@@ -343,7 +337,6 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 	}
 	defer client.Close()
 
-	// 2. GEO 检测
 	iso, flag, err := getLocationInfo(client.Client)
 	if err != nil {
 		log.Printf("getEgressInfoAdapter 地理位置测试失败: %v, meta: %+v", err, meta)
@@ -356,13 +349,12 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 		Meta:    meta,
 	}
 
-	// 3. 只对香港节点检测 NAT
+	// 只对香港节点检测 NAT
 	if iso == "HK" {
-		natType, _ := getNATType(client.Client)
+		natType, _ := getNATType(proxy)
 		info.NATType = natType
 	}
 
-	// 4. 节点计数
 	counterMutex.Lock()
 	nodeCounter[iso]++
 	info.Count = nodeCounter[iso]
@@ -436,4 +428,39 @@ func getCountryCode(_ string) string {
 		}
 	}
 	return "Unknown"
+}
+
+// DetectNodesAdapter 并发检测所有节点，集成 adapter 机制
+func DetectNodesAdapter(nodes []map[string]any, maxConcurrent int) []*NodeInfo {
+	var wg sync.WaitGroup
+	results := make([]*NodeInfo, len(nodes))
+	tasks := make(chan struct{
+		idx int
+		meta map[string]any
+	}, len(nodes))
+
+	for i := 0; i < maxConcurrent; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range tasks {
+				info, err := getEgressInfoAdapter(task.meta)
+				if err == nil {
+					info.Meta = task.meta
+					results[task.idx] = info
+				} else {
+					results[task.idx] = nil
+				}
+			}
+		}()
+	}
+	for idx, meta := range nodes {
+		tasks <- struct{
+			idx int
+			meta map[string]any
+		}{idx, meta}
+	}
+	close(tasks)
+	wg.Wait()
+	return results
 }
