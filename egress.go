@@ -113,10 +113,7 @@ func getNATType(proxy constant.Proxy) (string, error) {
 		Host string
 		Port uint16
 	}{
-		{"stun.l.google.com", 19302},
-		{"stun1.l.google.com", 19302},
-		{"stun.stunprotocol.org", 3478},
-		{"stun.voiparound.com", 3478},
+		{"stun.miwifi.com", 3478},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -295,13 +292,34 @@ func parseParams(config string) (map[string]string, []string) {
 func adaptForMihomo(surgeMap map[string]string) map[string]any {
 	adapted := make(map[string]any)
 	for k, v := range surgeMap {
-		// 自动识别所有布尔值
-		if v == "true" || v == "false" || v == "1" || v == "0" {
-			adapted[k] = parseBoolString(v)
-		} else if k == "encrypt-method" {
-			adapted["cipher"] = v
-		} else {
-			adapted[k] = v
+		switch k {
+		case "encrypt-method":
+			adapted["cipher"] = v // ss 专用
+		case "udp-relay":
+			adapted["udp"] = parseBoolString(v) // surge udp-relay -> clash/mihomo udp
+		case "username":
+			adapted["uuid"] = v // vmess 专用
+		case "obfs":
+			adapted["plugin"] = v // ss obfs
+		case "obfs-host":
+			adapted["plugin-opts"] = map[string]any{"host": v} // ss obfs-host
+		case "alpn":
+			// 支持字符串和数组
+			if strings.Contains(v, ",") {
+				parts := strings.Split(v, ",")
+				for i := range parts {
+					parts[i] = strings.TrimSpace(parts[i])
+				}
+				adapted["alpn"] = parts
+			} else {
+				adapted["alpn"] = v
+			}
+		default:
+			if v == "true" || v == "false" || v == "1" || v == "0" {
+				adapted[k] = parseBoolString(v)
+			} else {
+				adapted[k] = v
+			}
 		}
 	}
 	return adapted
