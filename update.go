@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +28,7 @@ func updateNodes() error {
 		log.Printf("updateNodes 没有成功处理任何节点")
 		return fmt.Errorf("没有成功处理任何节点")
 	}
-
+	
 	// 2. 并发检测节点质量
 	checked := DetectNodesAdapter(allNodes, 20)
 
@@ -38,7 +37,7 @@ func updateNodes() error {
 	for _, info := range checked {
 		if info == nil || !FilterNode(info.Meta, info) {
 			continue // 跳过检测失败或不符合筛选条件
-		}
+			}
 		name := RenameNode(info.Meta, info)
 		// 从 Meta 取出 _params 和 _order
 		params, ok1 := info.Meta["_params"].(map[string]string)
@@ -51,12 +50,12 @@ func updateNodes() error {
 		delete(params, "name") // 确保最终输出不含 name 字段
 		line := fmt.Sprintf("%s = %s", name, buildSurgeLine(params, order))
 		outputLines = append(outputLines, line)
-	}
+			}
 
 	content := strings.Join(outputLines, "\n")
 	// 输出前自然排序
 	lines := strings.Split(content, "\n")
-	natsort.SortStrings(lines)
+	natsort.Sort(lines)
 	content = strings.Join(lines, "\n")
 
 	// 统计每个上游机场的成功/失败节点数量
@@ -68,8 +67,8 @@ func updateNodes() error {
 				source := meta.(string)
 				failBySource[source]++
 			}
-			continue
-		}
+				continue
+			}
 		if meta, ok := info.Meta["source"]; ok {
 			source := meta.(string)
 			successBySource[source]++
@@ -206,41 +205,6 @@ func mapToSurgeLine(m map[string]any, name string) string {
 	return fmt.Sprintf("%s = %s, %s, %s, %s", name, typ, server, port, strings.Join(params, ", "))
 }
 
-// DetectNodesAdapter 并发检测所有节点，集成 adapter 机制
-func DetectNodesAdapter(nodes []map[string]any, maxConcurrent int) []*NodeInfo {
-	var wg sync.WaitGroup
-	results := make([]*NodeInfo, len(nodes))
-	tasks := make(chan struct{
-		idx int
-		meta map[string]any
-	}, len(nodes))
-
-	for i := 0; i < maxConcurrent; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for task := range tasks {
-				info, err := getEgressInfoAdapter(task.meta)
-				if err == nil {
-					info.Meta = task.meta
-					results[task.idx] = info
-				} else {
-					results[task.idx] = nil
-				}
-			}
-		}()
-	}
-	for idx, meta := range nodes {
-		tasks <- struct{
-			idx int
-			meta map[string]any
-		}{idx, meta}
-	}
-	close(tasks)
-	wg.Wait()
-	return results
-}
-
 // 节点重命名函数
 func RenameNode(m map[string]any, info *NodeInfo) string {
 	if info.ISOCode == "HK" {
@@ -300,7 +264,7 @@ func FetchAndParseNodes() ([]map[string]any, error) {
 		go func(name, url string) {
 			defer wg.Done()
 			subNodes, err := fetchSubscription(url)
-			if err != nil {
+	if err != nil {
 				return
 			}
 			nodesMutex.Lock()
@@ -323,7 +287,7 @@ func FetchAndParseNodes() ([]map[string]any, error) {
 				continue
 			}
 			nodeMaps, err := processIngressNode(node)
-			if err != nil {
+	if err != nil {
 				continue
 			}
 			for _, m := range nodeMaps {
@@ -345,7 +309,7 @@ func formatBoolParams(params map[string]string) {
 			params[k] = "0"
 		}
 	}
-}
+	}
 
 // 按协议类型输出原生 Surge 节点格式，支持多协议
 func buildSurgeLine(params map[string]string, order []string) string {
@@ -363,7 +327,7 @@ func buildSurgeLine(params map[string]string, order []string) string {
 		}
 		if v, ok := params["password"]; ok && v != "" {
 			extraParts = append(extraParts, "password="+v)
-		}
+	}
 	case "trojan":
 		mainParts = []string{"trojan", server, port}
 		if v, ok := params["password"]; ok && v != "" {

@@ -137,7 +137,7 @@ func getNATType(proxy constant.Proxy) (string, error) {
 			conn, err := proxy.DialContext(ctx, &constant.Metadata{
 				Host:    host,
 				DstPort: port,
-				Network: "udp",
+				NetWork: constant.UDP,
 			})
 			if err != nil || conn == nil {
 				errorChan <- fmt.Errorf("UDP relay 失败: %v", err)
@@ -158,7 +158,7 @@ func getNATType(proxy constant.Proxy) (string, error) {
 				errorChan <- fmt.Errorf("读取 STUN 响应失败: %v", err)
 				return
 			}
-			var response stun.Event
+			var response stun.Message
 			if err := stun.Decode(buffer[:n], &response); err != nil {
 				errorChan <- fmt.Errorf("解析 STUN 响应失败: %v", err)
 				return
@@ -384,6 +384,7 @@ func CreateAdapterClient(meta map[string]any) *ProxyClient {
 			return proxy.DialContext(ctx, &constant.Metadata{
 				Host:    host,
 				DstPort: u16Port,
+				NetWork: constant.UDP,
 			})
 		},
 		IdleConnTimeout:   10 * time.Second,
