@@ -29,7 +29,7 @@ type NodeInfo struct {
 
 var (
 	// 节点计数器
-	nodeCounter = make(map[string]int)
+	nodeCounter = make(map[string]int) // key: source-ISOCode
 	counterMutex sync.Mutex
 
 	// 地理位置缓存
@@ -87,7 +87,6 @@ func init() {
 func getLocationInfo(client *http.Client) (string, string, error) {
 	resp, err := client.Get("https://www.cloudflare.com/cdn-cgi/trace")
 	if err != nil {
-		log.Printf("getLocationInfo 获取地理信息失败: %v", err)
 		return "", "", fmt.Errorf("获取地理信息失败: %v", err)
 	}
 	defer resp.Body.Close()
@@ -102,7 +101,6 @@ func getLocationInfo(client *http.Client) (string, string, error) {
 		}
 	}
 	if loc == "" || ip == "" {
-		log.Printf("getLocationInfo 未能获取地理信息")
 		return "", "", fmt.Errorf("未能获取地理信息")
 	}
 	flag := getCountryFlag(loc)
@@ -186,12 +184,14 @@ func getNATType(proxy constant.Proxy) (string, error) {
 	}
 
 	if len(results) == 0 {
-		log.Printf("getNATType 所有 STUN 服务器检测失败: %v", errors)
-		return "Unknown", fmt.Errorf("所有 STUN 服务器检测失败")
+		var detail []string
+		for _, err := range errors {
+			detail = append(detail, err.Error())
+		}
+		return "Unknown", fmt.Errorf("所有 STUN 服务器检测失败: [%s]", strings.Join(detail, "; "))
 	}
 
 	natType := analyzeNATType(results)
-	log.Printf("getNATType 检测结果: %s, 外部地址: %v", natType, results)
 	return natType, nil
 }
 
@@ -327,7 +327,7 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 	mihomoMeta := adaptForMihomo(params)
 	proxy, err := adapter.ParseProxy(mihomoMeta)
 	if err != nil {
-		log.Printf("getEgressInfoAdapter adapter.ParseProxy 失败: %v, meta: %+v", err, meta)
+		log.Printf("getEgressInfoAdapter adapter.ParseProxy 失败: %v\nmeta: %+v\nmihomoMeta: %+v", err, meta, mihomoMeta)
 		return nil, fmt.Errorf("adapter.ParseProxy 失败")
 	}
 	client := CreateAdapterClient(mihomoMeta)
@@ -351,13 +351,17 @@ func getEgressInfoAdapter(meta map[string]any) (*NodeInfo, error) {
 
 	// 只对香港节点检测 NAT
 	if iso == "HK" {
-		natType, _ := getNATType(proxy)
+		natType, err := getNATType(proxy)
+		if err != nil {
+			log.Printf("getEgressInfoAdapter NAT类型检测失败: %v, meta: %+v", err, meta)
+		}
 		info.NATType = natType
 	}
 
+	key := fmt.Sprintf("%v-%v", meta["source"], iso)
 	counterMutex.Lock()
-	nodeCounter[iso]++
-	info.Count = nodeCounter[iso]
+	nodeCounter[key]++
+	info.Count = nodeCounter[key]
 	counterMutex.Unlock()
 
 	return info, nil

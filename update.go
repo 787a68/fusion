@@ -348,8 +348,8 @@ func buildSurgeLine(params map[string]string, order []string) string {
 		mainParts = []string{typeStr, server, port}
 	}
 
-	// 只跳过 type/server/port/name，其余参数全部输出
-	exist := map[string]struct{}{"type":{}, "server":{}, "port":{}, "name":{}}
+	// 只跳过 type/server/port/name/encrypt-method/password，其余参数全部输出
+	exist := map[string]struct{}{"type":{}, "server":{}, "port":{}, "name":{}, "encrypt-method":{}, "password":{}}
 	for _, key := range order {
 		if _, skip := exist[key]; skip {
 			continue
